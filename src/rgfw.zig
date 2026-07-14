@@ -189,6 +189,7 @@ pub const Window = struct {
 
     pub fn requestClose(window: *Window) void {
         const handle = window.handle orelse return;
+        if (raw.RGFW_window_shouldClose(handle) != 0) return;
         raw.RGFW_window_setShouldClose(handle, 1);
     }
 

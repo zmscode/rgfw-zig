@@ -15,9 +15,7 @@ pub fn window(
 
     while (!app_window.shouldClose()) {
         rgfw.pollEvents();
-        while (app_window.nextEvent()) |event| {
-            if (event.kind() == .window_close) app_window.requestClose();
-        }
+        while (app_window.nextEvent()) |_| {}
         if (frame) |update| update(&app_window);
     }
 }
@@ -39,9 +37,7 @@ pub fn openGL(
     rgfw.OpenGL.swapInterval(&app_window, 1);
     while (!app_window.shouldClose()) {
         rgfw.pollEvents();
-        while (app_window.nextEvent()) |event| {
-            if (event.kind() == .window_close) app_window.requestClose();
-        }
+        while (app_window.nextEvent()) |_| {}
         if (frame) |update| update(&app_window);
         rgfw.OpenGL.swapBuffers(&app_window);
     }
@@ -64,9 +60,7 @@ pub fn egl(
     rgfw.EGL.swapInterval(&app_window, 1);
     while (!app_window.shouldClose()) {
         rgfw.pollEvents();
-        while (app_window.nextEvent()) |event| {
-            if (event.kind() == .window_close) app_window.requestClose();
-        }
+        while (app_window.nextEvent()) |_| {}
         if (frame) |update| update(&app_window);
         rgfw.EGL.swapBuffers(&app_window);
     }

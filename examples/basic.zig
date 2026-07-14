@@ -14,8 +14,6 @@ pub fn main() !void {
 
     while (!window.shouldClose()) {
         rgfw.pollEvents();
-        while (window.nextEvent()) |event| {
-            if (event.kind() == .window_close) window.requestClose();
-        }
+        while (window.nextEvent()) |_| {}
     }
 }

@@ -58,12 +58,13 @@ pub fn main() !void {
 
     while (!window.shouldClose()) {
         rgfw.pollEvents();
-        while (window.nextEvent()) |event| {
-            if (event.kind() == .window_close) window.requestClose();
-        }
+        while (window.nextEvent()) |_| {}
     }
 }
 ```
+
+RGFW marks the window as closing before it emits `.window_close`, so that event does not need to
+call `requestClose()`. Use `requestClose()` when application logic wants to initiate shutdown.
 
 The mechanically translated ABI remains available as `rgfw.raw`, or as the dependency module
 `rgfw-raw` when a consumer wants to import it separately. See

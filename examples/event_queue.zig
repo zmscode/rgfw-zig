@@ -13,7 +13,6 @@ pub fn main() !void {
         rgfw.waitForNextEvent();
         while (window.nextEvent()) |event| {
             std.debug.print("Queued event: {s}\n", .{@tagName(event.kind())});
-            if (event.kind() == .window_close) window.requestClose();
         }
     }
 }

@@ -27,9 +27,7 @@ pub fn run(title: [:0]const u8, draw: *const fn ([]u8, u32) void) !void {
     var frame_index: u32 = 0;
     while (!window.shouldClose()) : (frame_index +%= 1) {
         rgfw.pollEvents();
-        while (window.nextEvent()) |event| {
-            if (event.kind() == .window_close) window.requestClose();
-        }
+        while (window.nextEvent()) |_| {}
         draw(pixels, frame_index);
         surface.blit(&window);
     }

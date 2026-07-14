@@ -22,9 +22,7 @@ pub fn main() !void {
 
     while (!window.shouldClose()) {
         rgfw.pollEvents();
-        while (window.nextEvent()) |event| {
-            if (event.kind() == .window_close) window.requestClose();
-        }
+        while (window.nextEvent()) |_| {}
         if (window.keyPressed(.space)) window.showMouse(false);
         if (window.keyReleased(.space)) window.showMouse(true);
     }

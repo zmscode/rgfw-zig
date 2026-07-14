@@ -28,7 +28,5 @@ pub fn main() !void {
 }
 
 fn processEvents(window: *rgfw.Window) void {
-    while (window.nextEvent()) |event| {
-        if (event.kind() == .window_close) window.requestClose();
-    }
+    while (window.nextEvent()) |_| {}
 }
