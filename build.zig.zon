@@ -1,0 +1,29 @@
+.{
+    .name = .rgfw,
+    .fingerprint = 0x502c4210e5f63eac,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .vulkan_headers = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.4.352.tar.gz",
+            .hash = "N-V-__8AAHAZeALsJNAOsFHuMyyXDuoFVG48EQdnJGNAZ3Th",
+            .lazy = true,
+        },
+        .egl_headers = .{
+            .url = "https://github.com/KhronosGroup/EGL-Registry/archive/3d7796b.tar.gz",
+            .hash = "N-V-__8AAItrbQBen6_Wl2eZ2ax6B0G6qtKys7_uVz224o99",
+            .lazy = true,
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "examples",
+        "src",
+        "tests",
+        "tools",
+        "vendor",
+        "LICENSE",
+        "README.md",
+    },
+}

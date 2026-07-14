@@ -1,0 +1,19 @@
+const std = @import("std");
+const rgfw = @import("rgfw");
+
+pub fn main() !void {
+    var context = try rgfw.init("event-queue", .{});
+    defer context.deinit();
+    var window = try context.createWindow("Event queue", .{
+        .flags = .{ .centered = true, .allow_drag_and_drop = true },
+    });
+    defer window.deinit();
+
+    while (!window.shouldClose()) {
+        rgfw.waitForNextEvent();
+        while (window.nextEvent()) |event| {
+            std.debug.print("Queued event: {s}\n", .{@tagName(event.kind())});
+            if (event.kind() == .window_close) window.requestClose();
+        }
+    }
+}
