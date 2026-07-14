@@ -15,13 +15,20 @@ pub fn main() !void {
     const create_instance = load(vk.PFN_vkCreateInstance, null, "vkCreateInstance") orelse {
         return error.VulkanEntryPointMissing;
     };
-    const required = rgfw.Vulkan.requiredInstanceExtensions();
-    if (required.len != 2) return error.UnexpectedExtensionCount;
-
+    var required = rgfw.Vulkan.requiredInstanceExtensions();
+    if (required.count() != 2) return error.UnexpectedExtensionCount;
     const portability: [*:0]const u8 = "VK_KHR_portability_enumeration";
-    var extensions: [3][*c]const u8 = .{ required[0], required[1], null };
+    var extensions: [3][*c]const u8 = .{ null, null, null };
+    var extension_count: u32 = 0;
+    while (required.next()) |extension| {
+        extensions[extension_count] = extension.ptr;
+        extension_count += 1;
+    }
     const use_portability = builtin.os.tag == .macos;
-    if (use_portability) extensions[2] = portability;
+    if (use_portability) {
+        extensions[extension_count] = portability;
+        extension_count += 1;
+    }
 
     const application: vk.VkApplicationInfo = .{
         .sType = @intCast(vk.VK_STRUCTURE_TYPE_APPLICATION_INFO),
@@ -38,7 +45,7 @@ pub fn main() !void {
         else
             0,
         .pApplicationInfo = &application,
-        .enabledExtensionCount = if (use_portability) 3 else 2,
+        .enabledExtensionCount = extension_count,
         .ppEnabledExtensionNames = &extensions,
     };
 

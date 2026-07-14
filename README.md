@@ -55,6 +55,7 @@ pub fn main() !void {
     var window = try context.createWindow("Hello from Zig", .{
         .width = 800,
         .height = 450,
+        .exit_key = .escape,
         .flags = .{ .centered = true, .no_resize = true },
     });
     defer window.deinit();
@@ -64,9 +65,40 @@ pub fn main() !void {
 ```
 
 `pumpEvents()` is the concise path when an application only needs RGFW's window and input state.
-To inspect individual events, use `rgfw.pollEvents()` followed by `window.nextEvent()`. RGFW marks
-the window as closing before it emits `.window_close`, so that event does not need to call
-`requestClose()`. Use `requestClose()` when application logic wants to initiate shutdown.
+Exit keys are opt-in; omit `.exit_key` when Escape or another key belongs to application input.
+
+For typed event payloads, poll once and drain only the events from that platform snapshot:
+
+```zig
+context.pollEvents();
+var events = window.events();
+while (events.next()) |event| {
+    switch (event.payload()) {
+        .key_pressed => |key| if (key.key == .escape) window.requestClose(),
+        .mouse_raw_motion => |delta| {
+            _ = delta;
+        },
+        .window_close => {}, // RGFW has already marked the window as closing.
+        else => {},
+    }
+}
+```
+
+`nextQueuedEvent()` never polls implicitly; `nextEvent()` is its concise alias. `pollEvent()`
+retains RGFW's combined poll-and-pop behavior for applications that specifically want it.
+`event.rawEvent()` provides lossless access to the C event when integrating functionality newer
+than the typed wrapper.
+
+For compact handlers, nullable accessors such as `keyEvent()`, `mouseButton()`, `scrollDelta()`,
+`rawMouseDelta()`, `mousePosition()`, `focusState()`, `windowPosition()`, `windowSize()`, and
+`refreshRect()` return `null` when the event kind does not match.
+
+Captured first-person input is one state change rather than three independent calls:
+
+```zig
+window.setCursorMode(.captured);
+defer window.setCursorMode(.normal);
+```
 
 The mechanically translated ABI remains available as `rgfw.raw`, or as the dependency module
 `rgfw-raw` when a consumer wants to import it separately. See
@@ -158,10 +190,19 @@ defer context.deinit();
 var window = try context.createWindow("Vulkan", .{});
 defer window.deinit();
 
-const extensions = rgfw.Vulkan.requiredInstanceExtensions();
-// Enable `extensions` while creating your VkInstance, then:
+var extensions = rgfw.Vulkan.requiredInstanceExtensions();
+while (extensions.next()) |extension| {
+    // Enable this sentinel-terminated Zig slice while creating your VkInstance.
+    _ = extension;
+}
+// Then:
 const surface = try rgfw.Vulkan.createSurface(&window, instance);
 ```
+
+The iterator does not allocate. Low-level consumers can use
+`requiredInstanceExtensionPointers()` to obtain RGFW's original C pointer array. On macOS the
+package uses the standard `VK_EXT_metal_surface` path and creates the surface from a
+`CAMetalLayer`.
 
 When another Zig package owns independently translated Vulkan handle types, use the checked
 interop boundary instead of scattering `@ptrCast` calls through application code. For example,

@@ -16,8 +16,8 @@ pub fn main() !void {
         },
     });
     defer window.deinit();
-    window.setRawMouseMode(true);
-    defer window.setRawMouseMode(false);
+    window.setCursorMode(.captured);
+    defer window.setCursorMode(.normal);
 
     rgfw.OpenGL.makeCurrent(&window);
     while (window.isOpen()) {

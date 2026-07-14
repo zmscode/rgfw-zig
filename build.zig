@@ -214,12 +214,20 @@ fn addTestStep(
     optimize: std.builtin.OptimizeMode,
     rgfw: *std.Build.Module,
 ) void {
+    const foreign_vulkan_handles = b.createModule(.{
+        .root_source_file = b.path("tests/foreign_vulkan_handles.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
             .root_source_file = b.path("tests/smoke.zig"),
             .target = target,
             .optimize = optimize,
-            .imports = &.{.{ .name = "rgfw", .module = rgfw }},
+            .imports = &.{
+                .{ .name = "rgfw", .module = rgfw },
+                .{ .name = "foreign_vulkan_handles", .module = foreign_vulkan_handles },
+            },
         }),
     });
     const run_tests = b.addRunArtifact(tests);

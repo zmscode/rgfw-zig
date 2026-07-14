@@ -52,6 +52,18 @@ pub const Context = struct {
         std.debug.assert(context.active);
         return Window.create(title, options);
     }
+
+    /// Polls the platform once and queues events for every RGFW window.
+    pub fn pollEvents(context: *const Context) void {
+        std.debug.assert(context.active);
+        raw.RGFW_pollEvents();
+    }
+
+    /// Waits until the platform reports another event.
+    pub fn waitForNextEvent(context: *const Context) void {
+        std.debug.assert(context.active);
+        raw.RGFW_waitForEvent(@intCast(raw.RGFW_eventWaitNext));
+    }
 };
 
 pub fn init(class_name: [:0]const u8, options: InitOptions) InitError!Context {
@@ -156,7 +168,9 @@ pub const Window = struct {
         width: i32 = 800,
         height: i32 = 450,
         flags: WindowFlags = .{},
-        exit_key: ?raw.RGFW_key = @intCast(raw.RGFW_keyEscape),
+        /// An optional convenience key that asks RGFW to close the window.
+        /// Keep this null when the application owns all input bindings.
+        exit_key: ?Key = null,
     };
 
     fn create(title: [:0]const u8, options: Options) Error!Window {
@@ -172,7 +186,11 @@ pub const Window = struct {
             options.flags.toRaw(),
         ) orelse return error.CreationFailed;
 
-        if (options.exit_key) |key| raw.RGFW_window_setExitKey(handle, key);
+        if (options.exit_key) |key| {
+            raw.RGFW_window_setExitKey(handle, @intFromEnum(key));
+        } else {
+            raw.RGFW_window_setExitKey(handle, @intCast(raw.RGFW_keyNULL));
+        }
         return .{ .handle = handle };
     }
 
@@ -338,6 +356,45 @@ pub const Window = struct {
         raw.RGFW_window_captureMouse(handle, @intFromBool(enabled));
     }
 
+    /// Captures the pointer and enables raw mouse motion in one operation.
+    pub fn captureRawMouse(window: *Window, enabled: bool) void {
+        const handle = window.handle orelse return;
+        raw.RGFW_window_captureRawMouse(handle, @intFromBool(enabled));
+    }
+
+    pub fn rawMouseMode(window: *const Window) bool {
+        const handle = window.handle orelse return false;
+        return raw.RGFW_window_isRawMouseMode(handle) != 0;
+    }
+
+    pub fn mouseCaptured(window: *const Window) bool {
+        const handle = window.handle orelse return false;
+        return raw.RGFW_window_isCaptured(handle) != 0;
+    }
+
+    pub fn mouseHidden(window: *const Window) bool {
+        const handle = window.handle orelse return false;
+        return raw.RGFW_window_isMouseHidden(handle) != 0;
+    }
+
+    /// Applies the complete pointer visibility/capture state atomically from Zig's perspective.
+    pub fn setCursorMode(window: *Window, mode: CursorMode) void {
+        switch (mode) {
+            .normal => {
+                window.captureRawMouse(false);
+                window.showMouse(true);
+            },
+            .hidden => {
+                window.captureRawMouse(false);
+                window.showMouse(false);
+            },
+            .captured => {
+                window.captureRawMouse(true);
+                window.showMouse(false);
+            },
+        }
+    }
+
     pub fn center(window: *Window) void {
         const handle = window.handle orelse return;
         raw.RGFW_window_center(handle);
@@ -395,11 +452,31 @@ pub const Window = struct {
         return .{ .handle = @ptrCast(monitor_handle) };
     }
 
+    /// Pops one event already queued by `Context.pollEvents` or `rgfw.pollEvents`.
+    /// This function never polls the platform itself.
+    pub fn nextQueuedEvent(window: *Window) ?Event {
+        const handle = window.handle orelse return null;
+        var event: raw.RGFW_event = undefined;
+        if (raw.RGFW_window_checkQueuedEvent(handle, &event) == 0) return null;
+        return .{ .raw_value = event };
+    }
+
+    /// Concise alias for `nextQueuedEvent`.
     pub fn nextEvent(window: *Window) ?Event {
+        return window.nextQueuedEvent();
+    }
+
+    /// Polls when needed and returns one event. Prefer `pollEvents` plus `nextEvent`
+    /// when the application needs a stable, once-per-frame event batch.
+    pub fn pollEvent(window: *Window) ?Event {
         const handle = window.handle orelse return null;
         var event: raw.RGFW_event = undefined;
         if (raw.RGFW_window_checkEvent(handle, &event) == 0) return null;
-        return .{ .raw_event = event };
+        return .{ .raw_value = event };
+    }
+
+    pub fn events(window: *Window) EventIterator {
+        return .{ .window = window };
     }
 
     /// Polls the platform once and discards queued event payloads after RGFW updates its state.
@@ -417,6 +494,14 @@ pub const Window = struct {
     }
 };
 
+pub const EventIterator = struct {
+    window: *Window,
+
+    pub fn next(iterator: *EventIterator) ?Event {
+        return iterator.window.nextQueuedEvent();
+    }
+};
+
 pub const Size = struct {
     width: i32,
     height: i32,
@@ -430,6 +515,12 @@ pub const Point = struct {
 pub const Vector = struct {
     x: f32,
     y: f32,
+};
+
+pub const CursorMode = enum {
+    normal,
+    hidden,
+    captured,
 };
 
 pub const WindowFlags = struct {
@@ -483,9 +574,24 @@ pub const WindowFlags = struct {
 };
 
 pub const Key = enum(raw.RGFW_key) {
+    none = raw.RGFW_keyNULL,
     escape = raw.RGFW_keyEscape,
+    backtick = raw.RGFW_keyBacktick,
+    zero = raw.RGFW_key0,
+    one = raw.RGFW_key1,
+    two = raw.RGFW_key2,
+    three = raw.RGFW_key3,
+    four = raw.RGFW_key4,
+    five = raw.RGFW_key5,
+    six = raw.RGFW_key6,
+    seven = raw.RGFW_key7,
+    eight = raw.RGFW_key8,
+    nine = raw.RGFW_key9,
+    minus = raw.RGFW_keyMinus,
+    equal = raw.RGFW_keyEqual,
+    backspace = raw.RGFW_keyBackSpace,
+    tab = raw.RGFW_keyTab,
     space = raw.RGFW_keySpace,
-    enter = raw.RGFW_keyEnter,
     a = raw.RGFW_keyA,
     b = raw.RGFW_keyB,
     c = raw.RGFW_keyC,
@@ -512,12 +618,83 @@ pub const Key = enum(raw.RGFW_key) {
     x = raw.RGFW_keyX,
     y = raw.RGFW_keyY,
     z = raw.RGFW_keyZ,
+    period = raw.RGFW_keyPeriod,
+    comma = raw.RGFW_keyComma,
+    slash = raw.RGFW_keySlash,
+    bracket_left = raw.RGFW_keyBracket,
+    bracket_right = raw.RGFW_keyCloseBracket,
+    semicolon = raw.RGFW_keySemicolon,
+    apostrophe = raw.RGFW_keyApostrophe,
+    backslash = raw.RGFW_keyBackSlash,
+    enter = raw.RGFW_keyEnter,
+    delete = raw.RGFW_keyDelete,
+    f1 = raw.RGFW_keyF1,
+    f2 = raw.RGFW_keyF2,
+    f3 = raw.RGFW_keyF3,
+    f4 = raw.RGFW_keyF4,
+    f5 = raw.RGFW_keyF5,
+    f6 = raw.RGFW_keyF6,
+    f7 = raw.RGFW_keyF7,
+    f8 = raw.RGFW_keyF8,
+    f9 = raw.RGFW_keyF9,
+    f10 = raw.RGFW_keyF10,
+    f11 = raw.RGFW_keyF11,
+    f12 = raw.RGFW_keyF12,
+    f13 = raw.RGFW_keyF13,
+    f14 = raw.RGFW_keyF14,
+    f15 = raw.RGFW_keyF15,
+    f16 = raw.RGFW_keyF16,
+    f17 = raw.RGFW_keyF17,
+    f18 = raw.RGFW_keyF18,
+    f19 = raw.RGFW_keyF19,
+    f20 = raw.RGFW_keyF20,
+    f21 = raw.RGFW_keyF21,
+    f22 = raw.RGFW_keyF22,
+    f23 = raw.RGFW_keyF23,
+    f24 = raw.RGFW_keyF24,
+    f25 = raw.RGFW_keyF25,
+    caps_lock = raw.RGFW_keyCapsLock,
+    shift_left = raw.RGFW_keyShiftL,
     control_left = raw.RGFW_keyControlL,
+    alt_left = raw.RGFW_keyAltL,
+    super_left = raw.RGFW_keySuperL,
+    shift_right = raw.RGFW_keyShiftR,
     control_right = raw.RGFW_keyControlR,
+    alt_right = raw.RGFW_keyAltR,
+    super_right = raw.RGFW_keySuperR,
     up = raw.RGFW_keyUp,
     down = raw.RGFW_keyDown,
     left = raw.RGFW_keyLeft,
     right = raw.RGFW_keyRight,
+    insert = raw.RGFW_keyInsert,
+    menu = raw.RGFW_keyMenu,
+    end = raw.RGFW_keyEnd,
+    home = raw.RGFW_keyHome,
+    page_up = raw.RGFW_keyPageUp,
+    page_down = raw.RGFW_keyPageDown,
+    num_lock = raw.RGFW_keyNumLock,
+    keypad_slash = raw.RGFW_keyPadSlash,
+    keypad_multiply = raw.RGFW_keyPadMultiply,
+    keypad_plus = raw.RGFW_keyPadPlus,
+    keypad_minus = raw.RGFW_keyPadMinus,
+    keypad_equal = raw.RGFW_keyPadEqual,
+    keypad_one = raw.RGFW_keyPad1,
+    keypad_two = raw.RGFW_keyPad2,
+    keypad_three = raw.RGFW_keyPad3,
+    keypad_four = raw.RGFW_keyPad4,
+    keypad_five = raw.RGFW_keyPad5,
+    keypad_six = raw.RGFW_keyPad6,
+    keypad_seven = raw.RGFW_keyPad7,
+    keypad_eight = raw.RGFW_keyPad8,
+    keypad_nine = raw.RGFW_keyPad9,
+    keypad_zero = raw.RGFW_keyPad0,
+    keypad_period = raw.RGFW_keyPadPeriod,
+    keypad_enter = raw.RGFW_keyPadReturn,
+    scroll_lock = raw.RGFW_keyScrollLock,
+    print_screen = raw.RGFW_keyPrintScreen,
+    pause = raw.RGFW_keyPause,
+    world_one = raw.RGFW_keyWorld1,
+    world_two = raw.RGFW_keyWorld2,
     _,
 };
 
@@ -525,6 +702,11 @@ pub const MouseButton = enum(raw.RGFW_mouseButton) {
     left = raw.RGFW_mouseLeft,
     middle = raw.RGFW_mouseMiddle,
     right = raw.RGFW_mouseRight,
+    auxiliary_one = raw.RGFW_mouseMisc1,
+    auxiliary_two = raw.RGFW_mouseMisc2,
+    auxiliary_three = raw.RGFW_mouseMisc3,
+    auxiliary_four = raw.RGFW_mouseMisc4,
+    auxiliary_five = raw.RGFW_mouseMisc5,
     _,
 };
 
@@ -676,30 +858,306 @@ pub const EGL = if (features.egl) struct {
     }
 } else struct {};
 
+pub const KeyModifiers = struct {
+    caps_lock: bool = false,
+    num_lock: bool = false,
+    control: bool = false,
+    alt: bool = false,
+    shift: bool = false,
+    super: bool = false,
+    scroll_lock: bool = false,
+
+    fn fromRaw(value: raw.RGFW_keymod) KeyModifiers {
+        return .{
+            .caps_lock = value & raw.RGFW_modCapsLock != 0,
+            .num_lock = value & raw.RGFW_modNumLock != 0,
+            .control = value & raw.RGFW_modControl != 0,
+            .alt = value & raw.RGFW_modAlt != 0,
+            .shift = value & raw.RGFW_modShift != 0,
+            .super = value & raw.RGFW_modSuper != 0,
+            .scroll_lock = value & raw.RGFW_modScrollLock != 0,
+        };
+    }
+};
+
+pub const KeyEvent = struct {
+    key: Key,
+    repeated: bool,
+    modifiers: KeyModifiers,
+};
+
+pub const MouseMotionEvent = struct {
+    position: Point,
+    in_window: bool,
+};
+
+pub const DataTransferKind = enum(raw.RGFW_dataTransferType) {
+    none = raw.RGFW_dataNone,
+    text = raw.RGFW_dataText,
+    file = raw.RGFW_dataFile,
+    url = raw.RGFW_dataURL,
+    image = raw.RGFW_dataImage,
+    unknown = raw.RGFW_dataUnknown,
+    _,
+};
+
+pub const DragAction = enum(raw.RGFW_dndActionType) {
+    none = raw.RGFW_dndActionNone,
+    enter = raw.RGFW_dndActionEnter,
+    move = raw.RGFW_dndActionMove,
+    exit = raw.RGFW_dndActionExit,
+    _,
+};
+
+pub const DataDrop = struct {
+    first: ?*const raw.RGFW_dataDropNode,
+
+    pub fn iterator(drop: DataDrop) DataDropIterator {
+        return .{ .next_node = drop.first };
+    }
+};
+
+pub const DataDropItem = struct {
+    bytes: []const u8,
+    kind: DataTransferKind,
+};
+
+pub const DataDropIterator = struct {
+    next_node: ?*const raw.RGFW_dataDropNode,
+
+    pub fn next(iterator: *DataDropIterator) ?DataDropItem {
+        const node = iterator.next_node orelse return null;
+        iterator.next_node = node.next;
+        const bytes = if (node.data) |data| data[0..node.length] else &.{};
+        return .{
+            .bytes = bytes,
+            .kind = @enumFromInt(node.type),
+        };
+    }
+};
+
+pub const DataDragEvent = struct {
+    position: Point,
+    action: DragAction,
+    data_kind: DataTransferKind,
+};
+
+pub const UnknownEvent = struct {
+    kind: EventKind,
+    raw_value: raw.RGFW_event,
+};
+
+/// A lossless, typed view of an RGFW event. Unknown future event kinds retain
+/// the complete raw value in the `.unknown` case.
+pub const EventPayload = union(enum) {
+    none,
+    key_pressed: KeyEvent,
+    key_released: KeyEvent,
+    key_character: u32,
+    mouse_button_pressed: MouseButton,
+    mouse_button_released: MouseButton,
+    mouse_scroll: Vector,
+    mouse_motion: MouseMotionEvent,
+    mouse_raw_motion: Vector,
+    mouse_enter,
+    mouse_leave,
+    window_moved: Point,
+    window_resized: Size,
+    window_focus_in,
+    window_focus_out,
+    window_refresh: Rect,
+    window_close,
+    window_maximized,
+    window_minimized,
+    window_restored,
+    data_drop: DataDrop,
+    data_drag: DataDragEvent,
+    scale_updated: Vector,
+    monitor_connected: ?Monitor,
+    monitor_disconnected: ?Monitor,
+    unknown: UnknownEvent,
+};
+
 pub const Event = struct {
-    raw_event: raw.RGFW_event,
+    raw_value: raw.RGFW_event,
 
     pub fn kind(event: *const Event) EventKind {
-        return @enumFromInt(event.raw_event.type);
+        return @enumFromInt(event.raw_value.type);
     }
 
-    pub fn key(event: *const Event) ?raw.RGFW_keyEvent {
-        return switch (event.kind()) {
-            .key_pressed, .key_released => event.raw_event.key,
+    pub fn rawEvent(event: *const Event) *const raw.RGFW_event {
+        return &event.raw_value;
+    }
+
+    /// Returns key data for `.key_pressed` and `.key_released` events.
+    pub fn keyEvent(event: *const Event) ?KeyEvent {
+        return switch (event.payload()) {
+            .key_pressed, .key_released => |value| value,
             else => null,
         };
     }
 
-    pub fn keyValue(event: *const Event) ?Key {
-        const key_event = event.key() orelse return null;
-        return @enumFromInt(key_event.value);
-    }
-
-    pub fn mouseButton(event: *const Event) ?raw.RGFW_mouseButtonEvent {
-        return switch (event.kind()) {
-            .mouse_button_pressed, .mouse_button_released => event.raw_event.button,
+    /// Returns the button for `.mouse_button_pressed` and
+    /// `.mouse_button_released` events.
+    pub fn mouseButton(event: *const Event) ?MouseButton {
+        return switch (event.payload()) {
+            .mouse_button_pressed, .mouse_button_released => |value| value,
             else => null,
         };
+    }
+
+    /// Returns the delta for a `.mouse_scroll` event.
+    pub fn scrollDelta(event: *const Event) ?Vector {
+        return switch (event.payload()) {
+            .mouse_scroll => |value| value,
+            else => null,
+        };
+    }
+
+    /// Returns the delta for a `.mouse_raw_motion` event.
+    pub fn rawMouseDelta(event: *const Event) ?Vector {
+        return switch (event.payload()) {
+            .mouse_raw_motion => |value| value,
+            else => null,
+        };
+    }
+
+    /// Returns the pointer position for a `.mouse_motion` event.
+    pub fn mousePosition(event: *const Event) ?Point {
+        return switch (event.payload()) {
+            .mouse_motion => |value| value.position,
+            else => null,
+        };
+    }
+
+    /// Returns whether the pointer is inside the window for a `.mouse_motion` event.
+    pub fn mouseInWindow(event: *const Event) ?bool {
+        return switch (event.payload()) {
+            .mouse_motion => |value| value.in_window,
+            else => null,
+        };
+    }
+
+    /// Returns `true` for `.window_focus_in`, `false` for
+    /// `.window_focus_out`, and `null` for every other event kind.
+    pub fn focusState(event: *const Event) ?bool {
+        return switch (event.kind()) {
+            .window_focus_in => true,
+            .window_focus_out => false,
+            else => null,
+        };
+    }
+
+    /// Returns the new position for a `.window_moved` event.
+    pub fn windowPosition(event: *const Event) ?Point {
+        return switch (event.payload()) {
+            .window_moved => |value| value,
+            else => null,
+        };
+    }
+
+    /// Returns the new size for a `.window_resized` event.
+    pub fn windowSize(event: *const Event) ?Size {
+        return switch (event.payload()) {
+            .window_resized => |value| value,
+            else => null,
+        };
+    }
+
+    /// Returns the damaged rectangle for a `.window_refresh` event.
+    pub fn refreshRect(event: *const Event) ?Rect {
+        return switch (event.payload()) {
+            .window_refresh => |value| value,
+            else => null,
+        };
+    }
+
+    pub fn payload(event: *const Event) EventPayload {
+        return switch (event.kind()) {
+            .none => .none,
+            .key_pressed => .{ .key_pressed = keyPayload(event.raw_value.key) },
+            .key_released => .{ .key_released = keyPayload(event.raw_value.key) },
+            .key_character => .{ .key_character = event.raw_value.keyChar.value },
+            .mouse_button_pressed => .{
+                .mouse_button_pressed = @enumFromInt(event.raw_value.button.value),
+            },
+            .mouse_button_released => .{
+                .mouse_button_released = @enumFromInt(event.raw_value.button.value),
+            },
+            .mouse_scroll => .{ .mouse_scroll = .{
+                .x = event.raw_value.delta.x,
+                .y = event.raw_value.delta.y,
+            } },
+            .mouse_motion => .{ .mouse_motion = .{
+                .position = .{
+                    .x = event.raw_value.mouse.x,
+                    .y = event.raw_value.mouse.y,
+                },
+                .in_window = event.raw_value.mouse.inWindow != 0,
+            } },
+            .mouse_raw_motion => .{ .mouse_raw_motion = .{
+                .x = event.raw_value.delta.x,
+                .y = event.raw_value.delta.y,
+            } },
+            .mouse_enter => .mouse_enter,
+            .mouse_leave => .mouse_leave,
+            .window_moved => .{ .window_moved = .{
+                .x = event.raw_value.update.x,
+                .y = event.raw_value.update.y,
+            } },
+            .window_resized => .{ .window_resized = .{
+                .width = event.raw_value.update.w,
+                .height = event.raw_value.update.h,
+            } },
+            .window_focus_in => .window_focus_in,
+            .window_focus_out => .window_focus_out,
+            .window_refresh => .{ .window_refresh = .{
+                .x = event.raw_value.update.x,
+                .y = event.raw_value.update.y,
+                .width = event.raw_value.update.w,
+                .height = event.raw_value.update.h,
+            } },
+            .window_close => .window_close,
+            .window_maximized => .window_maximized,
+            .window_minimized => .window_minimized,
+            .window_restored => .window_restored,
+            .data_drop => .{ .data_drop = .{ .first = event.raw_value.drop.value } },
+            .data_drag => .{ .data_drag = .{
+                .position = .{
+                    .x = event.raw_value.drag.x,
+                    .y = event.raw_value.drag.y,
+                },
+                .action = @enumFromInt(event.raw_value.drag.action),
+                .data_kind = @enumFromInt(event.raw_value.drag.dataType),
+            } },
+            .scale_updated => .{ .scale_updated = .{
+                .x = event.raw_value.scale.x,
+                .y = event.raw_value.scale.y,
+            } },
+            .monitor_connected => .{
+                .monitor_connected = monitorPayload(event.raw_value.monitor.monitor),
+            },
+            .monitor_disconnected => .{
+                .monitor_disconnected = monitorPayload(event.raw_value.monitor.monitor),
+            },
+            else => .{ .unknown = .{
+                .kind = event.kind(),
+                .raw_value = event.raw_value,
+            } },
+        };
+    }
+
+    fn keyPayload(value: raw.RGFW_keyEvent) KeyEvent {
+        return .{
+            .key = @enumFromInt(value.value),
+            .repeated = value.repeat != 0,
+            .modifiers = .fromRaw(value.mod),
+        };
+    }
+
+    fn monitorPayload(value: ?*const raw.RGFW_monitor) ?Monitor {
+        const handle = value orelse return null;
+        return .{ .handle = @constCast(handle) };
     }
 };
 
@@ -748,7 +1206,29 @@ pub const Vulkan = if (features.vulkan) struct {
         unsigned_integer,
     };
 
-    pub fn requiredInstanceExtensions() []const [*:0]const u8 {
+    pub const ExtensionIterator = struct {
+        pointers: []const [*:0]const u8,
+        index: usize = 0,
+
+        pub fn next(iterator: *ExtensionIterator) ?[:0]const u8 {
+            if (iterator.index == iterator.pointers.len) return null;
+            const pointer = iterator.pointers[iterator.index];
+            iterator.index += 1;
+            return std.mem.span(pointer);
+        }
+
+        pub fn count(iterator: ExtensionIterator) usize {
+            return iterator.pointers.len;
+        }
+    };
+
+    /// Returns a zero-allocation iterator of Zig sentinel slices.
+    pub fn requiredInstanceExtensions() ExtensionIterator {
+        return .{ .pointers = requiredInstanceExtensionPointers() };
+    }
+
+    /// Exposes RGFW's original C pointer array for low-level consumers.
+    pub fn requiredInstanceExtensionPointers() []const [*:0]const u8 {
         var count: usize = 0;
         const extension_ptrs = raw.RGFW_getRequiredInstanceExtensions_Vulkan(&count);
         if (extension_ptrs == null) return &.{};
@@ -825,7 +1305,8 @@ pub const Vulkan = if (features.vulkan) struct {
         const foreign_representation = handleRepresentation(Foreign) orelse return false;
         const native_representation = handleRepresentation(Native) orelse return false;
         if (foreign_representation != native_representation) return false;
-        return @sizeOf(Foreign) == @sizeOf(Native);
+        return @sizeOf(Foreign) == @sizeOf(Native) and
+            @alignOf(Foreign) == @alignOf(Native);
     }
 
     fn requireCompatibleHandle(
@@ -847,8 +1328,8 @@ pub const Vulkan = if (features.vulkan) struct {
         const Source = @TypeOf(source);
         comptime requireCompatibleHandle(Source, Target, "Vulkan handle");
 
-        return switch (handleRepresentation(Target).?) {
-            .opaque_pointer => switch (@typeInfo(Source)) {
+        if (comptime handleRepresentation(Target).? == .opaque_pointer) {
+            return switch (@typeInfo(Source)) {
                 .optional => if (source) |pointer|
                     @ptrCast(pointer)
                 else switch (@typeInfo(Target)) {
@@ -856,9 +1337,9 @@ pub const Vulkan = if (features.vulkan) struct {
                     else => unreachable,
                 },
                 else => @ptrCast(source),
-            },
-            .unsigned_integer => @bitCast(source),
-        };
+            };
+        }
+        return @bitCast(source);
     }
 
     fn handleIsNull(handle: anytype) bool {
@@ -894,9 +1375,11 @@ test "Vulkan foreign handles preserve their ABI representation" {
     const ForeignSurfaceOpaque = opaque {};
     const ForeignInstance = ?*ForeignInstanceOpaque;
     const ForeignSurface = ?*ForeignSurfaceOpaque;
+    const ForeignNonNullInstance = *ForeignInstanceOpaque;
 
     try std.testing.expect(Vulkan.handlesAreCompatible(ForeignInstance, Vulkan.Instance));
     try std.testing.expect(Vulkan.handlesAreCompatible(ForeignSurface, Vulkan.Surface));
+    try std.testing.expect(Vulkan.handlesAreCompatible(ForeignNonNullInstance, Vulkan.Instance));
     try std.testing.expect(!Vulkan.handlesAreCompatible(u32, Vulkan.Instance));
     try std.testing.expect(!Vulkan.handlesAreCompatible(?*u8, Vulkan.Instance));
 
@@ -906,6 +1389,16 @@ test "Vulkan foreign handles preserve their ABI representation" {
     try std.testing.expectEqual(
         @intFromPtr(foreign_instance.?),
         @intFromPtr(instance_round_trip.?),
+    );
+
+    const foreign_non_null_instance: ForeignNonNullInstance = @ptrFromInt(0x1800);
+    const native_non_null_instance = Vulkan.castCompatibleHandle(
+        Vulkan.Instance,
+        foreign_non_null_instance,
+    );
+    try std.testing.expectEqual(
+        @intFromPtr(foreign_non_null_instance),
+        @intFromPtr(native_non_null_instance),
     );
 
     const native_surface: Vulkan.Surface = @ptrFromInt(0x2000);

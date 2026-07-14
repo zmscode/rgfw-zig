@@ -21,7 +21,7 @@ pub fn main() !void {
     defer second.deinit();
 
     while (first.isOpen() and second.isOpen()) {
-        rgfw.pollEvents();
+        context.pollEvents();
         processEvents(&first);
         processEvents(&second);
     }

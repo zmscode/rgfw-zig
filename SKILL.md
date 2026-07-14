@@ -41,6 +41,7 @@ defer context.deinit();
 var window = try context.createWindow("Window title", .{
     .width = 800,
     .height = 450,
+    .exit_key = .escape,
     .flags = .{ .centered = true },
 });
 defer window.deinit();
@@ -48,10 +49,23 @@ defer window.deinit();
 while (window.isOpen()) window.pumpEvents();
 ```
 
+Exit keys are opt-in. Leave `.exit_key` unset when Escape belongs to the application's input map.
+
 Use `pumpEvents()` when event payloads are not needed. To consume payloads, call
-`rgfw.pollEvents()` once per frame and drain `window.nextEvent()`. RGFW already marks the window as
-closing before emitting `.window_close`; never call `requestClose()` in response to that event.
-Call `requestClose()` only when application logic initiates shutdown.
+`context.pollEvents()` once per frame, create `var events = window.events()`, and drain
+`events.next()`. Switch on `event.payload()` for Zig-native key, button, motion, scroll, resize,
+scale, drag/drop, and monitor data. `nextQueuedEvent()` explicitly reads only the existing queue;
+`nextEvent()` is its concise alias. Use `pollEvent()` only when combined poll-and-pop behavior is
+intentional. RGFW already marks the window as closing before emitting `.window_close`; never call
+`requestClose()` in response to that event.
+
+For compact, non-exhaustive handlers, use the nullable `Event` accessors: `keyEvent()`,
+`mouseButton()`, `scrollDelta()`, `rawMouseDelta()`, `mousePosition()`, `mouseInWindow()`,
+`focusState()`, `windowPosition()`, `windowSize()`, and `refreshRect()`. Each returns `null` for an
+event kind outside its documented match. Use `rawEvent()` only for data not represented above.
+
+Use `window.setCursorMode(.captured)` and `.normal` for first-person pointer ownership rather than
+coordinating raw mode, capture, and visibility separately.
 
 ## Select a graphics backend
 
@@ -59,8 +73,10 @@ Call `requestClose()` only when application logic initiates shutdown.
   `.flags.open_gl = true`.
 - EGL: enable `.egl = true`, initialize with `.backend = .egl`, and create the window with
   `.flags.egl = true`.
-- Vulkan: enable `.vulkan = true` and initialize with `.backend = .vulkan`. Enable every extension
-  returned by `rgfw.Vulkan.requiredInstanceExtensions()` before creating the instance.
+- Vulkan: enable `.vulkan = true` and initialize with `.backend = .vulkan`. Iterate with
+  `var extensions = rgfw.Vulkan.requiredInstanceExtensions()` and repeatedly call
+  `extensions.next()` to obtain sentinel-terminated Zig slices. Enable each before creating the
+  instance. macOS uses `VK_EXT_metal_surface` rather than the deprecated MVK surface extension.
 
 For independently translated Vulkan handles such as `vk-zig`, centralize ABI reinterpretation:
 

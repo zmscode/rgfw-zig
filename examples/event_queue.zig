@@ -10,9 +10,11 @@ pub fn main() !void {
     defer window.deinit();
 
     while (window.isOpen()) {
-        rgfw.waitForNextEvent();
-        while (window.nextEvent()) |event| {
-            std.debug.print("Queued event: {s}\n", .{@tagName(event.kind())});
+        context.waitForNextEvent();
+        context.pollEvents();
+        var events = window.events();
+        while (events.next()) |event| {
+            std.debug.print("Queued event: {s}\n", .{@tagName(event.payload())});
         }
     }
 }
