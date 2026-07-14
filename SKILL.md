@@ -100,7 +100,11 @@ format, overflow, and buffer length are checked once.
 Use `Clipboard.readAlloc` for owned clipboard bytes and `Clipboard.read` only for a short-lived
 borrow invalidated by the next read or context shutdown. Enumerate displays with
 `Context.monitors`, free that Zig-allocated slice, and use `Monitor.supportedModes` or
-`Monitor.gammaRamp` for allocator-owned copies.
+`Monitor.gammaRamp` for allocator-owned copies. An empty monitor slice is a valid transient state,
+and `Context.primaryMonitor()` returns `null` safely. Treat `Window.setFullscreen` and
+`Window.scaleToMonitor` as fallible and handle `error.MonitorUnavailable`. Monitor event payloads
+are immutable `MonitorSnapshot` values so disconnect events never expose stale handles;
+re-enumerate the context when a live `Monitor` is needed. Physical monitor sizes are millimetres.
 
 Use `window.rawHandle()` and `surface.rawHandle()` for checked RGFW handles. Use
 `window.nativeHandle()` for a tagged Cocoa, Win32, X11, or Wayland value. Do not read the public
@@ -159,6 +163,9 @@ zig build bindings
 zig build update
 zig build update -Drgfw-ref=v1.8.1
 ```
+
+The update command applies `patches/rgfw-monitor-fixes.patch` after cloning upstream. If the patch
+no longer applies, review the changed upstream monitor implementation instead of bypassing it.
 
 After changes, run the relevant matrix:
 

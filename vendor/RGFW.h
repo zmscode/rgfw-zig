@@ -3179,6 +3179,7 @@ struct RGFW_info {
 	RGFW_debugFunc debugCallbackSrc;
 	RGFW_genericFunc callbacks[RGFW_eventCount];
     RGFW_event events[RGFW_MAX_EVENTS]; /* A circular buffer (FIFO), using eventBottom/Len  */
+	RGFW_monitor monitorEvents[RGFW_MAX_EVENTS]; /* stable snapshots for queued monitor events */
 
 	i32 eventBottom;
     i32 eventLen;
@@ -4295,6 +4296,13 @@ void RGFW_eventQueuePush(const RGFW_event* event) {
 	i32 eventTop = (_RGFW->eventBottom + _RGFW->eventLen) % RGFW_MAX_EVENTS;
 	_RGFW->eventLen += 1;
 	_RGFW->events[eventTop] = *event;
+
+	if ((event->type == RGFW_monitorConnected || event->type == RGFW_monitorDisconnected) &&
+		event->monitor.monitor != NULL) {
+		_RGFW->monitorEvents[eventTop] = *event->monitor.monitor;
+		_RGFW->monitorEvents[eventTop].node = NULL;
+		_RGFW->events[eventTop].monitor.monitor = &_RGFW->monitorEvents[eventTop];
+	}
 }
 
 RGFW_event* RGFW_eventQueuePop(void) {
@@ -4568,6 +4576,7 @@ void RGFW_window_center(RGFW_window* win) {
 RGFW_bool RGFW_monitor_scaleToWindow(RGFW_monitor* mon, RGFW_window* win) {
 	RGFW_monitorMode mode;
     RGFW_ASSERT(win != NULL);
+	if (mon == NULL) return RGFW_FALSE;
 
 	mode.w = win->w;
 	mode.h = win->h;
@@ -4611,6 +4620,7 @@ void RGFW_window_setShouldClose(RGFW_window* win, RGFW_bool shouldClose) {
 
 void RGFW_window_scaleToMonitor(RGFW_window* win) {
 	RGFW_monitor* monitor = RGFW_window_getMonitor(win);
+	if (monitor == NULL) return;
 	if (monitor->scaleX == 0 && monitor->scaleY == 0)
 		return;
 
@@ -4731,6 +4741,7 @@ RGFW_monitorNode* RGFW_monitors_add(const RGFW_monitor* mon) {
 	#endif
 
 	if (node == NULL) return NULL;
+	RGFW_MEMZERO(node, sizeof(*node));
 
 	node->next = NULL;
 
@@ -4751,17 +4762,22 @@ RGFW_monitorNode* RGFW_monitors_add(const RGFW_monitor* mon) {
 }
 
 void RGFW_monitors_remove(RGFW_monitorNode* node, RGFW_monitorNode* prev) {
+	RGFW_monitorNode* next = node->next;
 	_RGFW->monitors.count -= 1;
 
-	RGFW_monitorNode_free(node);
+	if (_RGFW->monitors.primary == node) _RGFW->monitors.primary = NULL;
+	if (_RGFW->monitors.list.cur == node) {
+		_RGFW->monitors.list.cur = (prev == node) ? next : prev;
+	}
 
 	/* remove node from the list */
 	if (prev != node) {
-		prev->next = node->next;
+		prev->next = next;
 	} else { /* node is the head */
-		_RGFW->monitors.list.head = node->next;
+		_RGFW->monitors.list.head = next;
 	}
 
+	RGFW_monitorNode_free(node);
 	node->next = NULL;
 
 	#if (RGFW_PREALLOCATED_MONITORS)
@@ -4784,13 +4800,17 @@ void RGFW_monitors_remove(RGFW_monitorNode* node, RGFW_monitorNode* prev) {
 }
 
 void RGFW_monitors_refresh(void) {
-	RGFW_monitorNode* prev = _RGFW->monitors.list.head;
-	for (RGFW_monitorNode* node = _RGFW->monitors.list.head; node; node = node->next) {
-		if (node->disconnected == RGFW_FALSE) continue;
-
-		RGFW_monitorCallback(_RGFW->root, &node->mon, RGFW_FALSE);
-		RGFW_monitors_remove(node, prev);
-		prev = node;
+	RGFW_monitorNode* prev = NULL;
+	RGFW_monitorNode* node = _RGFW->monitors.list.head;
+	while (node != NULL) {
+		RGFW_monitorNode* next = node->next;
+		if (node->disconnected == RGFW_TRUE) {
+			RGFW_monitorCallback(_RGFW->root, &node->mon, RGFW_FALSE);
+			RGFW_monitors_remove(node, prev ? prev : node);
+		} else {
+			prev = node;
+		}
+		node = next;
 	}
 }
 
@@ -4804,9 +4824,16 @@ void RGFW_freeMonitors(void) {
 }
 
 RGFW_monitorMode* RGFW_monitor_getModes(RGFW_monitor* monitor, size_t* count) {
+	if (count) *count = 0;
 	size_t num = RGFW_monitor_getModesPtr(monitor, NULL);
-	RGFW_monitorMode* modes = (RGFW_monitorMode*)RGFW_ALLOC(num * sizeof(RGFW_monitorNode));
+	if (num == 0) return NULL;
+	RGFW_monitorMode* modes = (RGFW_monitorMode*)RGFW_ALLOC(num * sizeof(RGFW_monitorMode));
+	if (modes == NULL) return NULL;
 	num = RGFW_monitor_getModesPtr(monitor, &modes);
+	if (num == 0) {
+		RGFW_FREE(modes);
+		return NULL;
+	}
 
 	if (count) *count = num;
 	return modes;
@@ -4818,21 +4845,27 @@ void RGFW_freeModes(RGFW_monitorMode* modes) {
 
 RGFW_bool RGFW_monitor_findClosestMode(RGFW_monitor* monitor, RGFW_monitorMode* mode, RGFW_monitorMode* closest) {
 	size_t count = RGFW_monitor_getModesPtr(monitor, NULL);
-	RGFW_monitorMode* modes = (RGFW_monitorMode*)RGFW_ALLOC(count * sizeof(RGFW_monitorNode));
+	if (count == 0) return RGFW_FALSE;
+	RGFW_monitorMode* modes = (RGFW_monitorMode*)RGFW_ALLOC(count * sizeof(RGFW_monitorMode));
+	if (modes == NULL) return RGFW_FALSE;
 	count = RGFW_monitor_getModesPtr(monitor, &modes);
+	if (count == 0) {
+		RGFW_FREE(modes);
+		return RGFW_FALSE;
+	}
 
 	RGFW_monitorMode* chosen = NULL;
 
-	u32 topScore = 1;
+	u32 topScore = 0;
 	for (size_t i = 0; i < count; i++) {
 		RGFW_monitorMode* mode2 = &modes[i];
 
 		u32 score = 0;
 		if (mode->w == mode2->w && mode->h == mode2->h) score += 1000;
 		if (mode->red == mode2->red && mode->green == mode2->green && mode->blue == mode2->blue) score += 100;
-		if (mode->refreshRate == mode->refreshRate) score += 10;
+		if (mode->refreshRate == mode2->refreshRate) score += 10;
 
-		if (score > topScore) {
+		if (chosen == NULL || score > topScore) {
 			topScore = score;
 			chosen = mode2;
 		}
@@ -4883,16 +4916,33 @@ RGFW_bool RGFW_monitor_getMode(RGFW_monitor* monitor, RGFW_monitorMode* mode) {
 
 RGFW_gammaRamp* RGFW_monitor_getGammaRamp(RGFW_monitor* monitor) {
 	RGFW_gammaRamp* ramp = (RGFW_gammaRamp*)RGFW_ALLOC(sizeof(RGFW_gammaRamp));
+	if (ramp == NULL) return NULL;
 	ramp->count = RGFW_monitor_getGammaRampPtr(monitor, NULL);
+	if (ramp->count == 0) {
+		RGFW_FREE(ramp);
+		return NULL;
+	}
 	ramp->red = (u16*)RGFW_ALLOC(sizeof(u16) * ramp->count);
 	ramp->green = (u16*)RGFW_ALLOC(sizeof(u16) * ramp->count);
 	ramp->blue = (u16*)RGFW_ALLOC(sizeof(u16) * ramp->count);
+	if (ramp->red == NULL || ramp->green == NULL || ramp->blue == NULL) {
+		if (ramp->red != NULL) RGFW_FREE(ramp->red);
+		if (ramp->green != NULL) RGFW_FREE(ramp->green);
+		if (ramp->blue != NULL) RGFW_FREE(ramp->blue);
+		RGFW_FREE(ramp);
+		return NULL;
+	}
 	ramp->count = RGFW_monitor_getGammaRampPtr(monitor, ramp);
+	if (ramp->count == 0) {
+		RGFW_freeGammaRamp(ramp);
+		return NULL;
+	}
 
 	return ramp;
 }
 
 void RGFW_freeGammaRamp(RGFW_gammaRamp* ramp) {
+	if (ramp == NULL) return;
 	RGFW_FREE(ramp->red);
 	RGFW_FREE(ramp->green);
 	RGFW_FREE(ramp->blue);
@@ -4902,6 +4952,7 @@ void RGFW_freeGammaRamp(RGFW_gammaRamp* ramp) {
 RGFW_bool RGFW_monitor_setGammaPtr(RGFW_monitor* monitor, float gamma, u16* ptr, size_t count) {
 	RGFW_ASSERT(monitor);
     RGFW_ASSERT(gamma > 0.0f);
+	if (ptr == NULL || count < 2) return RGFW_FALSE;
 
 	size_t i;
     for (i = 0;  i < count;  i++) {
@@ -4925,7 +4976,9 @@ RGFW_bool RGFW_monitor_setGammaPtr(RGFW_monitor* monitor, float gamma, u16* ptr,
 
 RGFW_bool RGFW_monitor_setGamma(RGFW_monitor* monitor, float gamma) {
 	size_t count = RGFW_monitor_getGammaRampPtr(monitor, NULL);
+	if (count < 2) return RGFW_FALSE;
 	u16* ptr = (u16*)RGFW_ALLOC(count * sizeof(u16));
+	if (ptr == NULL) return RGFW_FALSE;
 
 	RGFW_bool ret = RGFW_monitor_setGammaPtr(monitor, gamma, ptr, count);
 	RGFW_FREE(ptr);
@@ -4940,6 +4993,7 @@ RGFW_monitor** RGFW_getMonitors(size_t* len) {
 	if (RGFW_getMonitorsPtr(0, NULL, &count) == RGFW_FALSE || count == 0) return NULL;
 
 	RGFW_monitor** monitors = (RGFW_monitor**)RGFW_ALLOC(sizeof(RGFW_monitor*) * count);
+	if (monitors == NULL) return NULL;
 
 	if (RGFW_getMonitorsPtr(count, monitors, &count) == RGFW_FALSE) {
 		RGFW_FREE(monitors);
@@ -4960,10 +5014,6 @@ RGFW_bool RGFW_getMonitorsPtr(size_t max, RGFW_monitor** monitors, size_t* len) 
 	if (monitors == NULL || max == 0) return RGFW_TRUE;
 
 
-	if (len != NULL) {
-		*len = max;
-	}
-
 	size_t i = 0;
 	RGFW_monitorNode* cur_node = _RGFW->monitors.list.head;
 	while (cur_node != NULL && i < max) {
@@ -4971,6 +5021,7 @@ RGFW_bool RGFW_getMonitorsPtr(size_t max, RGFW_monitor** monitors, size_t* len) 
 		i++;
 		cur_node = cur_node->next;
 	}
+	if (len != NULL) *len = i;
 
 	return RGFW_TRUE;
 }
@@ -4980,6 +5031,7 @@ RGFW_monitor* RGFW_getPrimaryMonitor(void) {
 	if (_RGFW->monitors.primary == NULL) {
 		_RGFW->monitors.primary = _RGFW->monitors.list.head;
 	}
+	if (_RGFW->monitors.primary == NULL) return NULL;
 
 	return &_RGFW->monitors.primary->mon;
 }
@@ -8579,6 +8631,7 @@ RGFW_monitor* RGFW_FUNC(RGFW_window_getMonitor) (RGFW_window* win) {
 	}
 
 
+	if (_RGFW->monitors.list.head == NULL) return NULL;
 	return &_RGFW->monitors.list.head->mon;
 }
 
@@ -11851,6 +11904,7 @@ void RGFW_window_setFullscreen(RGFW_window* win, RGFW_bool fullscreen) {
 	RGFW_ASSERT(win != NULL);
 
 	RGFW_monitor* mon  = RGFW_window_getMonitor(win);
+	if (mon == NULL) return;
 
 	if (fullscreen == RGFW_FALSE) {
 		RGFW_monitor_setMode(mon, &win->internal.oldMode);
@@ -14365,18 +14419,20 @@ void RGFW_window_setFullscreen(RGFW_window* win, RGFW_bool fullscreen) {
 		win->internal.flags |= RGFW_windowFullscreen;
 
 		RGFW_monitor* mon = RGFW_window_getMonitor(win);
+		if (mon == NULL) {
+			win->internal.flags &= ~(u32)RGFW_windowFullscreen;
+			return;
+		}
 		RGFW_monitor_scaleToWindow(mon, win);
 
 		RGFW_window_setBorder(win, RGFW_FALSE);
 
-		if (mon != NULL) {
-			win->x = mon->x;
-			win->y = mon->y;
-			win->w = mon->mode.w;
-			win->h = mon->mode.h;
-			RGFW_window_resize(win, mon->mode.w, mon->mode.h);
-			RGFW_window_move(win, mon->x, mon->y);
-		}
+		win->x = mon->x;
+		win->y = mon->y;
+		win->w = mon->mode.w;
+		win->h = mon->mode.h;
+		RGFW_window_resize(win, mon->mode.w, mon->mode.h);
+		RGFW_window_move(win, mon->x, mon->y);
 
 		((id(*)(id, SEL, SEL))objc_msgSend)((id)win->src.window, sel_registerName("orderFront:"), (SEL)NULL);
 		objc_msgSend_void_id(win->src.window, sel_registerName("setLevel:"), 25);
@@ -14706,28 +14762,81 @@ float RGFW_osx_getRefreshRate(CGDirectDisplayID display, CGDisplayModeRef mode) 
     return 60;
 }
 
+static u32 RGFW_osx_getNSScreenDisplays(CGDirectDisplayID** displays) {
+	Class NSScreenClass = objc_getClass("NSScreen");
+	id screens = objc_msgSend_id(NSScreenClass, sel_registerName("screens"));
+	NSUInteger screenCount = (NSUInteger)objc_msgSend_uint(screens, sel_registerName("count"));
+	if (screenCount == 0) return 0;
+
+	CGDirectDisplayID* foundDisplays = (CGDirectDisplayID*)RGFW_ALLOC(
+		sizeof(CGDirectDisplayID) * (size_t)screenCount
+	);
+	if (foundDisplays == NULL) return 0;
+
+	u32 found = 0;
+	for (NSUInteger i = 0; i < screenCount; i++) {
+		id screen = ((id (*)(id, SEL, NSUInteger))objc_msgSend)(
+			screens,
+			sel_registerName("objectAtIndex:"),
+			i
+		);
+		id description = objc_msgSend_id(screen, sel_registerName("deviceDescription"));
+		id screenNumberKey = NSString_stringWithUTF8String("NSScreenNumber");
+		id screenNumber = objc_msgSend_id_id(
+			description,
+			sel_registerName("objectForKey:"),
+			screenNumberKey
+		);
+		if (screenNumber == NULL) continue;
+		foundDisplays[found++] = (CGDirectDisplayID)objc_msgSend_uint(
+			screenNumber,
+			sel_registerName("unsignedIntValue")
+		);
+	}
+
+	if (found == 0) {
+		RGFW_FREE(foundDisplays);
+		return 0;
+	}
+	*displays = foundDisplays;
+	return found;
+}
+
 void RGFW_pollMonitors(void) {
-	u32 count;
+	u32 count = 0;
+	CGDirectDisplayID* displays = NULL;
 
-	if (CGGetActiveDisplayList(0, NULL, &count) != kCGErrorSuccess) {
-		return;
+	if (CGGetActiveDisplayList(0, NULL, &count) == kCGErrorSuccess && count != 0) {
+		displays = (CGDirectDisplayID*)RGFW_ALLOC(sizeof(CGDirectDisplayID) * count);
+		if (displays == NULL) return;
+		if (CGGetActiveDisplayList(count, displays, &count) != kCGErrorSuccess) {
+			RGFW_FREE(displays);
+			displays = NULL;
+			count = 0;
+		}
 	}
 
-	CGDirectDisplayID* displays = (CGDirectDisplayID*)RGFW_ALLOC(sizeof(CGDirectDisplayID) * count);
-	if (CGGetActiveDisplayList(count, displays, &count) != kCGErrorSuccess) {
-		return;
+	/* macOS can transiently return an empty active-display list even while
+	 * NSScreen still exposes usable displays (for example, after display sleep). */
+	if (count == 0) {
+		if (displays != NULL) RGFW_FREE(displays);
+		displays = NULL;
+		count = RGFW_osx_getNSScreenDisplays(&displays);
 	}
-
+	/* Preserve known monitors when neither API can currently enumerate screens. */
+	if (count == 0) return;
 
 	for (RGFW_monitorNode* node = _RGFW->monitors.list.head; node; node = node->next) {
 		node->disconnected = RGFW_TRUE;
 	}
 
 	CGDirectDisplayID primary = CGMainDisplayID();
+	if (primary == 0) primary = displays[0];
 
 	u32 i;
 	for (i = 0; i < count; i++) {
 		RGFW_monitor monitor;
+		RGFW_MEMZERO(&monitor, sizeof(monitor));
 
 		u32 uintNum = CGDisplayUnitNumber(displays[i]);
 		id screen = RGFW_getNSScreenForDisplayUInt(uintNum);
@@ -14737,24 +14846,21 @@ void RGFW_pollMonitors(void) {
 			if (node->uintNum == uintNum) break;
 		}
 
+		RGFW_bool newlyConnected = (node == NULL);
 		if (node) {
-			node->screen = (void*)screen;
-			node->display = displays[i];
+			monitor = node->mon;
 			node->disconnected = RGFW_FALSE;
-			if (displays[i] == primary) {
-				_RGFW->monitors.primary = node;
-			}
-			continue;
+		} else {
+			const char name[] = "MacOS\0";
+			RGFW_MEMCPY(monitor.name, name, 6);
 		}
-
-		const char name[] = "MacOS\0";
-		RGFW_MEMCPY(monitor.name, name, 6);
 
 		CGRect bounds = CGDisplayBounds(displays[i]);
 		monitor.x = (i32)bounds.origin.x;
 		monitor.y = (i32)RGFW_cocoaYTransform((float)(bounds.origin.y + bounds.size.height - 1));
 
 		CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displays[i]);
+		if (mode == NULL) continue;
 		monitor.mode.w = (i32)CGDisplayModeGetWidth(mode);
 		monitor.mode.h = (i32)CGDisplayModeGetHeight(mode);
 		monitor.mode.src = (void*)mode;
@@ -14762,21 +14868,23 @@ void RGFW_pollMonitors(void) {
 
 		monitor.mode.refreshRate = RGFW_osx_getRefreshRate(displays[i], mode);
 		CFRelease(mode);
+		monitor.mode.src = NULL;
 
 		CGSize screenSizeMM = CGDisplayScreenSize(displays[i]);
 		monitor.physW = (float)screenSizeMM.width / 25.4f;
 		monitor.physH = (float)screenSizeMM.height / 25.4f;
 
-		float ppi_width = ((float)monitor.mode.w / monitor.physW);
-		float ppi_height = ((float)monitor.mode.h / monitor.physH);
-
 		monitor.pixelRatio = (float)((CGFloat (*)(id, SEL))abi_objc_msgSend_fpret) (screen, sel_registerName("backingScaleFactor"));
-		float dpi = 96.0f * monitor.pixelRatio;
+		monitor.scaleX = monitor.pixelRatio;
+		monitor.scaleY = monitor.pixelRatio;
 
-		monitor.scaleX = ((((float) (ppi_width) / dpi) * 10.0f)) / 10.0f;
-		monitor.scaleY = ((((float) (ppi_height) / dpi) * 10.0f)) / 10.0f;
-
-		node = RGFW_monitors_add(&monitor);
+		if (node == NULL) {
+			node = RGFW_monitors_add(&monitor);
+			if (node == NULL) continue;
+		} else {
+			node->mon = monitor;
+			node->mon.node = node;
+		}
 
 		node->screen = (void*)screen;
 		node->uintNum = uintNum;
@@ -14786,7 +14894,7 @@ void RGFW_pollMonitors(void) {
 			_RGFW->monitors.primary = node;
 		}
 
-		RGFW_monitorCallback(_RGFW->root, &node->mon, RGFW_TRUE);
+		if (newlyConnected) RGFW_monitorCallback(_RGFW->root, &node->mon, RGFW_TRUE);
 	}
 
 	RGFW_FREE(displays);
@@ -14814,9 +14922,28 @@ size_t RGFW_monitor_getGammaRampPtr(RGFW_monitor* monitor, RGFW_gammaRamp* ramp)
 	pool = objc_msgSend_id(pool, sel_registerName("init"));
 
     u32 size = CGDisplayGammaTableCapacity(monitor->node->display);
+	if (size == 0) {
+		objc_msgSend_bool_void(pool, sel_registerName("drain"));
+		return 0;
+	}
     CGGammaValue* values = (CGGammaValue*)RGFW_ALLOC(size * 3 * sizeof(CGGammaValue));
+	if (values == NULL) {
+		objc_msgSend_bool_void(pool, sel_registerName("drain"));
+		return 0;
+	}
 
-    CGGetDisplayTransferByTable(monitor->node->display, size, values, values + size, values + size * 2, &size);
+	if (CGGetDisplayTransferByTable(
+		monitor->node->display,
+		size,
+		values,
+		values + size,
+		values + size * 2,
+		&size
+	) != kCGErrorSuccess) {
+		RGFW_FREE(values);
+		objc_msgSend_bool_void(pool, sel_registerName("drain"));
+		return 0;
+	}
 
     for (u32 i = 0;  ramp && i < size; i++) {
         ramp->red[i] = (u16) (values[i] * 65535);
@@ -14835,6 +14962,10 @@ RGFW_bool RGFW_monitor_setGammaRamp(RGFW_monitor* monitor, RGFW_gammaRamp* ramp)
 	pool = objc_msgSend_id(pool, sel_registerName("init"));
 
     CGGammaValue* values = (CGGammaValue*)RGFW_ALLOC(ramp->count * 3 * sizeof(CGGammaValue));
+	if (values == NULL) {
+		objc_msgSend_bool_void(pool, sel_registerName("drain"));
+		return RGFW_FALSE;
+	}
 
     for (u32 i = 0;  i < ramp->count;  i++) {
         values[i] = ramp->red[i] / 65535.f;
@@ -14842,13 +14973,19 @@ RGFW_bool RGFW_monitor_setGammaRamp(RGFW_monitor* monitor, RGFW_gammaRamp* ramp)
         values[i + ramp->count * 2] = ramp->blue[i] / 65535.f;
     }
 
-    CGSetDisplayTransferByTable(monitor->node->display, (u32)ramp->count, values, values + ramp->count, values + ramp->count * 2);
+	CGError result = CGSetDisplayTransferByTable(
+		monitor->node->display,
+		(u32)ramp->count,
+		values,
+		values + ramp->count,
+		values + ramp->count * 2
+	);
 
     RGFW_FREE(values);
 
 	objc_msgSend_bool_void(pool, sel_registerName("drain"));
 
-	return RGFW_TRUE;
+	return result == kCGErrorSuccess;
 }
 
 size_t RGFW_monitor_getModesPtr(RGFW_monitor* mon, RGFW_monitorMode** modes) {
@@ -14879,11 +15016,7 @@ size_t RGFW_monitor_getModesPtr(RGFW_monitor* mon, RGFW_monitorMode** modes) {
 }
 
 RGFW_bool RGFW_monitor_setMode(RGFW_monitor* mon, RGFW_monitorMode* mode) {
-	if (CGDisplaySetDisplayMode(mon->node->display, (CGDisplayModeRef)mode->src, NULL) == kCGErrorSuccess) {
-		return RGFW_TRUE;
-	}
-
-	return RGFW_FALSE;
+	return RGFW_monitor_requestMode(mon, mode, RGFW_monitorAll);
 }
 
 RGFW_bool RGFW_monitor_requestMode(RGFW_monitor* mon, RGFW_monitorMode* mode, RGFW_modeRequest request) {
@@ -14895,6 +15028,7 @@ RGFW_bool RGFW_monitor_requestMode(RGFW_monitor* mon, RGFW_monitorMode* mode, RG
 	}
 
 	CGDisplayModeRef native = NULL;
+	RGFW_monitorMode selected;
 
     CFIndex i;
     for (i = 0; i < CFArrayGetCount(allModes); i++) {
@@ -14909,20 +15043,19 @@ RGFW_bool RGFW_monitor_requestMode(RGFW_monitor* mon, RGFW_monitorMode* mode, RG
 
 		if (RGFW_monitorModeCompare(mode, &foundMode, request)) {
 			native = cmode;
-			mon->mode = foundMode;
+			selected = foundMode;
 			break;
         }
     }
 
-    CFRelease(allModes);
-
-	if (native) {
-		if (CGDisplaySetDisplayMode(display, native, NULL) == kCGErrorSuccess) {
-			return RGFW_TRUE;
-		}
+	RGFW_bool changed = RGFW_FALSE;
+	if (native && CGDisplaySetDisplayMode(display, native, NULL) == kCGErrorSuccess) {
+		mon->mode = selected;
+		mon->mode.src = NULL;
+		changed = RGFW_TRUE;
 	}
-
-	return RGFW_FALSE;
+	CFRelease(allModes);
+	return changed;
 }
 
 RGFW_monitor* RGFW_window_getMonitor(RGFW_window* win) {

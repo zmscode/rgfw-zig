@@ -1,3 +1,4 @@
+const std = @import("std");
 const rgfw = @import("rgfw");
 
 pub fn main() !void {
@@ -9,7 +10,11 @@ pub fn main() !void {
 fn update(window: *rgfw.Window) void {
     if (window.keyPressed(.b)) window.setBorder(window.borderless());
     if (window.keyPressed(.d)) window.setDragAndDrop(!window.allowsDragAndDrop());
-    if (window.keyPressed(.f)) window.setFullscreen(!window.fullscreen());
+    if (window.keyPressed(.f)) {
+        window.setFullscreen(!window.fullscreen()) catch |err| {
+            std.debug.print("Unable to toggle fullscreen: {t}\n", .{err});
+        };
+    }
     if (window.keyPressed(.m)) {
         if (window.maximized()) window.restore() else window.maximize();
     }

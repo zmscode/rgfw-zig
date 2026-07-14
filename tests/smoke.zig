@@ -81,6 +81,99 @@ test "monitor mode request groups map to RGFW flags" {
     );
 }
 
+test "monitor-dependent window operations fail safely" {
+    var inactive: rgfw.Window = .{ .handle = null };
+    try std.testing.expectError(error.InactiveObject, inactive.setFullscreen(true));
+    try std.testing.expectError(error.InactiveObject, inactive.scaleToMonitor());
+
+    if (rgfw.window_system != .custom) return;
+
+    var context = try rgfw.init("rgfw-monitor-safety-test", .{});
+    defer context.deinit();
+    try std.testing.expectEqual(@as(?rgfw.Monitor, null), context.primaryMonitor());
+
+    var window = try context.createWindow("monitorless", .{});
+    defer window.deinit();
+    try std.testing.expectError(error.MonitorUnavailable, window.setFullscreen(true));
+    try std.testing.expectError(error.MonitorUnavailable, window.scaleToMonitor());
+}
+
+test "monitor values use millimetres and preserve event snapshots" {
+    var native = std.mem.zeroes(rgfw.raw.RGFW_monitor);
+    @memcpy(native.name[0..4], "Test");
+    native.x = 11;
+    native.y = 22;
+    native.scaleX = 1.25;
+    native.scaleY = 1.5;
+    native.pixelRatio = 2;
+    native.physW = 10;
+    native.physH = 5;
+    native.mode = .{
+        .w = 1920,
+        .h = 1080,
+        .refreshRate = 120,
+        .red = 8,
+        .blue = 8,
+        .green = 8,
+        .src = null,
+    };
+
+    var monitor: rgfw.Monitor = .{ .handle = &native };
+    const physical_size = try monitor.physicalSize();
+    try std.testing.expectApproxEqAbs(@as(f32, 254), physical_size.width_mm, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 127), physical_size.height_mm, 0.001);
+
+    var raw_event = std.mem.zeroes(rgfw.raw.RGFW_event);
+    raw_event.monitor = .{
+        .type = @intCast(rgfw.raw.RGFW_monitorDisconnected),
+        .win = null,
+        .monitor = &native,
+        .state = 0,
+    };
+    const event = rgfw.Event.fromRaw(raw_event);
+    native.name[0] = 'X';
+    native.x = 99;
+    switch (event.payload()) {
+        .monitor_disconnected => |snapshot_optional| {
+            const snapshot = snapshot_optional orelse return error.MissingMonitorSnapshot;
+            try std.testing.expectEqualStrings("Test", snapshot.name());
+            try std.testing.expectEqual(@as(i32, 11), snapshot.position.x);
+            try std.testing.expectEqual(@as(f32, 2), snapshot.pixel_ratio);
+        },
+        else => return error.UnexpectedEventPayload,
+    }
+}
+
+test "custom backend covers monitor refresh and mode selection" {
+    if (rgfw.window_system != .custom) return;
+
+    var context = try rgfw.init("rgfw-monitor-regression-test", .{});
+    defer context.deinit();
+    try std.testing.expect(rgfw.raw.RGFW_zig_test_monitorRefresh() != 0);
+
+    var native = std.mem.zeroes(rgfw.raw.RGFW_monitor);
+    var monitor: rgfw.Monitor = .{ .handle = &native };
+    const requested: rgfw.MonitorMode = .{
+        .width = 1920,
+        .height = 1080,
+        .refresh_rate = 120,
+        .red_bits = 8,
+        .green_bits = 8,
+        .blue_bits = 8,
+    };
+    const closest = try monitor.closestMode(requested);
+    try std.testing.expectEqual(@as(f32, 120), closest.refresh_rate);
+    try monitor.setMode(requested);
+
+    var unavailable_native = std.mem.zeroes(rgfw.raw.RGFW_monitor);
+    unavailable_native.x = -1;
+    var unavailable: rgfw.Monitor = .{ .handle = &unavailable_native };
+    try std.testing.expectError(error.ModeUnavailable, unavailable.supportedModes(std.testing.allocator));
+    try std.testing.expectError(error.ModeUnavailable, unavailable.closestMode(requested));
+    try std.testing.expectError(error.QueryFailed, unavailable.gammaRamp(std.testing.allocator));
+    try std.testing.expectError(error.GammaChangeFailed, unavailable.setGamma(1));
+}
+
 test "custom allocator hooks route RGFW allocation pairs" {
     if (!rgfw.features.custom_allocator) return;
 

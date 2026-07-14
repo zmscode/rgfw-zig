@@ -13,6 +13,8 @@ struct RGFW_nativeImage {
 
 #include "RGFW.h"
 
+RGFWDEF RGFW_bool RGFW_zig_test_monitorRefresh(void);
+
 #ifdef RGFW_IMPLEMENTATION
 
 i32 RGFW_initPlatform(const char* class_name, RGFW_initFlags flags) {
@@ -136,8 +138,9 @@ RGFW_bool RGFW_window_setIconEx(
 }
 
 RGFW_mouse* RGFW_createMouseStandard(RGFW_mouseIcon mouse) {
+    static u8 dummy_mouse;
     RGFW_UNUSED(mouse);
-    return NULL;
+    return (RGFW_mouse*)&dummy_mouse;
 }
 
 RGFW_bool RGFW_window_setMousePlatform(RGFW_window* window, RGFW_mouse* mouse) {
@@ -179,9 +182,12 @@ RGFW_monitor* RGFW_window_getMonitor(RGFW_window* window) {
 void RGFW_monitorNode_free(RGFW_monitorNode* node) { RGFW_UNUSED(node); }
 
 size_t RGFW_monitor_getModesPtr(RGFW_monitor* monitor, RGFW_monitorMode** modes) {
-    RGFW_UNUSED(monitor);
-    RGFW_UNUSED(modes);
-    return 0;
+	if (monitor->x == -1) return 0;
+    if (modes != NULL) {
+        (*modes)[0] = (RGFW_monitorMode){ 1920, 1080, 60, 8, 8, 8, NULL };
+        (*modes)[1] = (RGFW_monitorMode){ 1920, 1080, 120, 8, 8, 8, NULL };
+    }
+    return 2;
 }
 
 RGFW_bool RGFW_monitor_requestMode(
@@ -192,7 +198,7 @@ RGFW_bool RGFW_monitor_requestMode(
     RGFW_UNUSED(monitor);
     RGFW_UNUSED(mode);
     RGFW_UNUSED(request);
-    return RGFW_FALSE;
+    return RGFW_TRUE;
 }
 
 size_t RGFW_monitor_getGammaRampPtr(RGFW_monitor* monitor, RGFW_gammaRamp* ramp) {
@@ -218,6 +224,41 @@ RGFW_bool RGFW_readClipboardPtr(
     RGFW_UNUSED(capacity);
     if (data != NULL) RGFW_MEMZERO(data, sizeof(*data));
     return RGFW_FALSE;
+}
+
+RGFW_bool RGFW_zig_test_monitorRefresh(void) {
+    RGFW_monitor first;
+    RGFW_monitor removed;
+    RGFW_monitor last;
+    RGFW_MEMZERO(&first, sizeof(first));
+    RGFW_MEMZERO(&removed, sizeof(removed));
+    RGFW_MEMZERO(&last, sizeof(last));
+    first.x = 1;
+    removed.x = 2;
+    last.x = 3;
+
+    RGFW_monitorNode* first_node = RGFW_monitors_add(&first);
+    RGFW_monitorNode* removed_node = RGFW_monitors_add(&removed);
+    RGFW_monitorNode* last_node = RGFW_monitors_add(&last);
+    if (first_node == NULL || removed_node == NULL || last_node == NULL) {
+        RGFW_freeMonitors();
+        return RGFW_FALSE;
+    }
+
+    _RGFW->monitors.primary = removed_node;
+    removed_node->disconnected = RGFW_TRUE;
+    RGFW_bool queue_events = _RGFW->queueEvents;
+    _RGFW->queueEvents = RGFW_FALSE;
+    RGFW_monitors_refresh();
+    _RGFW->queueEvents = queue_events;
+
+    RGFW_bool valid = _RGFW->monitors.count == 2 &&
+        _RGFW->monitors.list.head == first_node &&
+        first_node->next == last_node &&
+        _RGFW->monitors.list.cur == last_node &&
+        _RGFW->monitors.primary == NULL;
+    RGFW_freeMonitors();
+    return valid;
 }
 
 #endif

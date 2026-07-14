@@ -877,6 +877,11 @@ fn addUpdateStep(
     });
     const checkout = clone.addOutputDirectoryArg("rgfw-upstream");
 
+    const apply_local_patches = b.addSystemCommand(&.{ "git", "-C" });
+    apply_local_patches.addDirectoryArg(checkout);
+    apply_local_patches.addArg("apply");
+    apply_local_patches.addFileArg(b.path("patches/rgfw-monitor-fixes.patch"));
+
     const revision = b.addSystemCommand(&.{ "git", "-C" });
     revision.addDirectoryArg(checkout);
     revision.addArgs(&.{ "rev-parse", "HEAD" });
@@ -905,12 +910,14 @@ fn addUpdateStep(
             "pub extern fn RGFW_createWindow",
         },
     });
+    verify.step.dependOn(&apply_local_patches.step);
 
     const update_files = b.addUpdateSourceFiles();
     update_files.addCopyFileToSource(checkout.path(b, "RGFW.h"), "vendor/RGFW.h");
     update_files.addCopyFileToSource(checkout.path(b, "LICENSE"), "vendor/LICENSE");
     update_files.addCopyFileToSource(revision_file, "vendor/RGFW_COMMIT");
     update_files.step.dependOn(&verify.step);
+    update_files.step.dependOn(&apply_local_patches.step);
 
     const update_step = b.step(
         "update",

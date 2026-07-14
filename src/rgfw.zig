@@ -280,7 +280,7 @@ pub const Context = struct {
     pub fn nextQueuedEvent(context: *const Context) ?Event {
         std.debug.assert(context.active);
         const event = raw.RGFW_eventQueuePop() orelse return null;
-        return .{ .raw_value = event.* };
+        return Event.fromRaw(event.*);
     }
 
     /// Returns an allocator-owned slice of monitor handles borrowed from Context.
@@ -653,6 +653,7 @@ pub const Window = struct {
         InvalidSize,
         CreationFailed,
         InactiveObject,
+        MonitorUnavailable,
         OperationFailed,
         IconAssignmentFailed,
         CursorAssignmentFailed,
@@ -987,8 +988,11 @@ pub const Window = struct {
         return raw.RGFW_window_allowsDND(handle) != 0;
     }
 
-    pub fn setFullscreen(window: *Window, enabled: bool) void {
-        const handle = window.handle orelse return;
+    pub fn setFullscreen(window: *Window, enabled: bool) Error!void {
+        const handle = window.handle orelse return error.InactiveObject;
+        if (raw.RGFW_window_getMonitor(handle) == null) {
+            return error.MonitorUnavailable;
+        }
         raw.RGFW_window_setFullscreen(handle, @intFromBool(enabled));
     }
 
@@ -1091,8 +1095,11 @@ pub const Window = struct {
         raw.RGFW_window_hide(handle);
     }
 
-    pub fn scaleToMonitor(window: *Window) void {
-        const handle = window.handle orelse return;
+    pub fn scaleToMonitor(window: *Window) Error!void {
+        const handle = window.handle orelse return error.InactiveObject;
+        if (raw.RGFW_window_getMonitor(handle) == null) {
+            return error.MonitorUnavailable;
+        }
         raw.RGFW_window_scaleToMonitor(handle);
     }
 
@@ -1180,7 +1187,7 @@ pub const Window = struct {
         const handle = window.handle orelse return null;
         var event: raw.RGFW_event = undefined;
         if (raw.RGFW_window_checkQueuedEvent(handle, &event) == 0) return null;
-        return .{ .raw_value = event };
+        return Event.fromRaw(event);
     }
 
     /// Concise alias for `nextQueuedEvent`.
@@ -1194,7 +1201,7 @@ pub const Window = struct {
         const handle = window.handle orelse return null;
         var event: raw.RGFW_event = undefined;
         if (raw.RGFW_window_checkEvent(handle, &event) == 0) return null;
-        return .{ .raw_value = event };
+        return Event.fromRaw(event);
     }
 
     pub fn events(window: *Window) EventIterator {
@@ -1910,6 +1917,37 @@ pub const PhysicalSize = struct {
     height_mm: f32,
 };
 
+/// Monitor data copied at the time an event was delivered. Unlike `Monitor`,
+/// this value remains valid after a disconnect or a later monitor refresh.
+pub const MonitorSnapshot = struct {
+    name_bytes: [128]u8,
+    position: Point,
+    scale: Vector,
+    pixel_ratio: f32,
+    physical_size: PhysicalSize,
+    mode: MonitorMode,
+
+    fn fromRaw(monitor: *const raw.RGFW_monitor) MonitorSnapshot {
+        return .{
+            .name_bytes = monitor.name,
+            .position = .{ .x = monitor.x, .y = monitor.y },
+            .scale = .{ .x = monitor.scaleX, .y = monitor.scaleY },
+            .pixel_ratio = monitor.pixelRatio,
+            .physical_size = .{
+                .width_mm = monitor.physW * 25.4,
+                .height_mm = monitor.physH * 25.4,
+            },
+            .mode = .fromRaw(monitor.mode),
+        };
+    }
+
+    pub fn name(snapshot: *const MonitorSnapshot) []const u8 {
+        const end = std.mem.indexOfScalar(u8, &snapshot.name_bytes, 0) orelse
+            snapshot.name_bytes.len;
+        return snapshot.name_bytes[0..end];
+    }
+};
+
 pub const GammaRamp = struct {
     red: []const u16,
     green: []const u16,
@@ -2002,13 +2040,17 @@ pub const Monitor = struct {
     }
 
     pub fn physicalSize(monitor: *const Monitor) Error!PhysicalSize {
-        var result: PhysicalSize = .{ .width_mm = 0, .height_mm = 0 };
+        var width_inches: f32 = 0;
+        var height_inches: f32 = 0;
         if (raw.RGFW_monitor_getPhysicalSize(
             monitor.handle,
-            &result.width_mm,
-            &result.height_mm,
+            &width_inches,
+            &height_inches,
         ) == 0) return error.QueryFailed;
-        return result;
+        return .{
+            .width_mm = width_inches * 25.4,
+            .height_mm = height_inches * 25.4,
+        };
     }
 
     pub fn currentMode(monitor: *const Monitor) Error!MonitorMode {
@@ -2063,10 +2105,7 @@ pub const Monitor = struct {
     }
 
     pub fn setMode(monitor: *Monitor, mode: MonitorMode) Error!void {
-        var mode_raw = mode.toRaw();
-        if (raw.RGFW_monitor_setMode(monitor.handle, &mode_raw) == 0) {
-            return error.ModeChangeFailed;
-        }
+        try monitor.requestMode(mode, .all);
     }
 
     pub fn scaleToWindow(monitor: *Monitor, window: *Window) (Error || HandleError)!void {
@@ -2634,13 +2673,26 @@ pub const EventPayload = union(enum) {
     data_drop: DataDrop,
     data_drag: DataDragEvent,
     scale_updated: Vector,
-    monitor_connected: ?Monitor,
-    monitor_disconnected: ?Monitor,
+    monitor_connected: ?MonitorSnapshot,
+    monitor_disconnected: ?MonitorSnapshot,
     unknown: UnknownEvent,
 };
 
 pub const Event = struct {
     raw_value: raw.RGFW_event,
+    monitor_snapshot: ?MonitorSnapshot = null,
+
+    pub fn fromRaw(raw_value: raw.RGFW_event) Event {
+        var event: Event = .{ .raw_value = raw_value };
+        if (raw_value.type == raw.RGFW_monitorConnected or
+            raw_value.type == raw.RGFW_monitorDisconnected)
+        {
+            if (raw_value.monitor.monitor) |monitor| {
+                event.monitor_snapshot = .fromRaw(monitor);
+            }
+        }
+        return event;
+    }
 
     pub fn kind(event: *const Event) EventKind {
         return @enumFromInt(event.raw_value.type);
@@ -2796,10 +2848,10 @@ pub const Event = struct {
                 .y = event.raw_value.scale.y,
             } },
             .monitor_connected => .{
-                .monitor_connected = monitorPayload(event.raw_value.monitor.monitor),
+                .monitor_connected = event.monitor_snapshot,
             },
             .monitor_disconnected => .{
-                .monitor_disconnected = monitorPayload(event.raw_value.monitor.monitor),
+                .monitor_disconnected = event.monitor_snapshot,
             },
             else => .{ .unknown = .{
                 .kind = event.kind(),
@@ -2814,11 +2866,6 @@ pub const Event = struct {
             .repeated = value.repeat != 0,
             .modifiers = .fromRaw(value.mod),
         };
-    }
-
-    fn monitorPayload(value: ?*const raw.RGFW_monitor) ?Monitor {
-        const handle = value orelse return null;
-        return .{ .handle = @constCast(handle) };
     }
 };
 
@@ -2882,8 +2929,8 @@ pub const callback = struct {
     pub const data_drop = EventDescriptor(.data_drop, DataDrop){};
     pub const data_drag = EventDescriptor(.data_drag, DataDragEvent){};
     pub const scale_updated = EventDescriptor(.scale_updated, Vector){};
-    pub const monitor_connected = EventDescriptor(.monitor_connected, ?Monitor){};
-    pub const monitor_disconnected = EventDescriptor(.monitor_disconnected, ?Monitor){};
+    pub const monitor_connected = EventDescriptor(.monitor_connected, ?MonitorSnapshot){};
+    pub const monitor_disconnected = EventDescriptor(.monitor_disconnected, ?MonitorSnapshot){};
 };
 
 const EventHandlerSlot = struct {
@@ -2982,7 +3029,7 @@ fn eventCallback(incoming: [*c]const raw.RGFW_event) callconv(.c) void {
     const raw_kind = incoming.*.type;
     if (raw_kind == raw.RGFW_eventNone or raw_kind >= raw.RGFW_eventCount) return;
     const slot = event_handler_slots[@intCast(raw_kind)] orelse return;
-    const wrapped: Event = .{ .raw_value = incoming.* };
+    const wrapped = Event.fromRaw(incoming.*);
     slot.dispatch(slot.context, &wrapped);
 }
 

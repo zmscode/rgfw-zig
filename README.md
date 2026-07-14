@@ -174,6 +174,8 @@ zig build update -Drgfw-ref=v1.8.1
 `zig build update` requires `git` and network access. It only replaces the vendored files after
 the downloaded header successfully translates and contains the core RGFW declarations. The exact
 upstream revision is recorded in `vendor/RGFW_COMMIT`.
+The update step also applies `patches/rgfw-monitor-fixes.patch`; it fails loudly if a future RGFW
+revision changes the affected monitor code and requires the compatibility patch to be refreshed.
 
 Bindings are generated for the selected target, so cross-target output can be requested with, for
 example, `zig build bindings -Dtarget=x86_64-windows-gnu`.
@@ -284,6 +286,18 @@ Use `Clipboard.readAlloc`, `Context.monitors`, `Monitor.supportedModes`, and
 `Monitor.gammaRamp` when data must outlive a borrowed view; free allocator-owned results with the
 same allocator. The ordinary software-surface path is `Surface.initForWindow`, which uses the
 window's visual and avoids X11 visual mismatches.
+
+`Context.monitors` can temporarily return an empty slice while the platform display service is
+unavailable, and `Context.primaryMonitor` returns `null` in that state. On macOS, rgfw-zig falls
+back to `NSScreen` when CoreGraphics incorrectly reports no active displays, and preserves the
+known list across a transient failure of both APIs. `Window.setFullscreen` and
+`Window.scaleToMonitor` are fallible; handle `error.MonitorUnavailable` instead of entering RGFW
+with a null monitor. `Monitor.physicalSize` reports millimetres, and `Monitor.setMode` resolves the
+requested public mode fields to a valid native mode before applying it.
+
+Queued and callback monitor events carry `MonitorSnapshot` values. These immutable snapshots stay
+valid after disconnects and monitor refreshes; enumerate `Context.monitors` again when a live
+`Monitor` handle is required.
 
 ### DirectX and WebGPU
 
