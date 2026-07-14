@@ -738,7 +738,15 @@ pub const Vulkan = if (features.vulkan) struct {
     pub const Surface = raw.VkSurfaceKHR;
     pub const Result = raw.VkResult;
 
-    pub const SurfaceError = error{SurfaceCreationFailed};
+    pub const SurfaceError = error{
+        InvalidInstance,
+        SurfaceCreationFailed,
+    };
+
+    const HandleRepresentation = enum {
+        opaque_pointer,
+        unsigned_integer,
+    };
 
     pub fn requiredInstanceExtensions() []const [*:0]const u8 {
         var count: usize = 0;
@@ -753,10 +761,32 @@ pub const Vulkan = if (features.vulkan) struct {
         instance: Instance,
     ) SurfaceError!@This().Surface {
         const handle = window.handle orelse return error.SurfaceCreationFailed;
+        if (handleIsNull(instance)) return error.InvalidInstance;
+
         var surface: @This().Surface = undefined;
         const result = raw.RGFW_window_createSurface_Vulkan(handle, instance, &surface);
         if (result != raw.VK_SUCCESS) return error.SurfaceCreationFailed;
+        if (handleIsNull(surface)) return error.SurfaceCreationFailed;
         return surface;
+    }
+
+    /// Creates a surface using ABI-compatible Vulkan handle types from another Zig package.
+    /// The reinterpretation does not retain, release, or transfer ownership of either handle.
+    /// The caller owns the newly created surface and must destroy it with its Vulkan instance.
+    pub fn createSurfaceAs(
+        comptime ForeignSurface: type,
+        window: *const Window,
+        foreign_instance: anytype,
+    ) SurfaceError!ForeignSurface {
+        const ForeignInstance = @TypeOf(foreign_instance);
+        comptime {
+            requireCompatibleHandle(ForeignInstance, Instance, "foreign Vulkan instance");
+            requireCompatibleHandle(ForeignSurface, @This().Surface, "foreign Vulkan surface");
+        }
+
+        const instance: Instance = castCompatibleHandle(Instance, foreign_instance);
+        const surface = try createSurface(window, instance);
+        return castCompatibleHandle(ForeignSurface, surface);
     }
 
     pub fn presentationSupported(
@@ -769,6 +799,75 @@ pub const Vulkan = if (features.vulkan) struct {
             physical_device,
             queue_family_index,
         ) != 0;
+    }
+
+    fn handleRepresentation(comptime Handle: type) ?HandleRepresentation {
+        const Payload = switch (@typeInfo(Handle)) {
+            .optional => |optional| optional.child,
+            else => Handle,
+        };
+
+        return switch (@typeInfo(Payload)) {
+            .pointer => |pointer| if (pointer.size == .one and
+                @typeInfo(pointer.child) == .@"opaque")
+                .opaque_pointer
+            else
+                null,
+            .int => |integer| if (integer.signedness == .unsigned)
+                .unsigned_integer
+            else
+                null,
+            else => null,
+        };
+    }
+
+    fn handlesAreCompatible(comptime Foreign: type, comptime Native: type) bool {
+        const foreign_representation = handleRepresentation(Foreign) orelse return false;
+        const native_representation = handleRepresentation(Native) orelse return false;
+        if (foreign_representation != native_representation) return false;
+        return @sizeOf(Foreign) == @sizeOf(Native);
+    }
+
+    fn requireCompatibleHandle(
+        comptime Foreign: type,
+        comptime Native: type,
+        comptime role: []const u8,
+    ) void {
+        if (handleRepresentation(Foreign) == null) {
+            @compileError(role ++ " type `" ++ @typeName(Foreign) ++
+                "` must be an opaque single-item pointer or unsigned integer Vulkan handle");
+        }
+        if (!handlesAreCompatible(Foreign, Native)) {
+            @compileError(role ++ " type `" ++ @typeName(Foreign) ++
+                "` is not ABI-compatible with `" ++ @typeName(Native) ++ "`");
+        }
+    }
+
+    fn castCompatibleHandle(comptime Target: type, source: anytype) Target {
+        const Source = @TypeOf(source);
+        comptime requireCompatibleHandle(Source, Target, "Vulkan handle");
+
+        return switch (handleRepresentation(Target).?) {
+            .opaque_pointer => switch (@typeInfo(Source)) {
+                .optional => if (source) |pointer|
+                    @ptrCast(pointer)
+                else switch (@typeInfo(Target)) {
+                    .optional => null,
+                    else => unreachable,
+                },
+                else => @ptrCast(source),
+            },
+            .unsigned_integer => @bitCast(source),
+        };
+    }
+
+    fn handleIsNull(handle: anytype) bool {
+        return switch (@typeInfo(@TypeOf(handle))) {
+            .optional => handle == null,
+            .int => handle == 0,
+            .pointer => false,
+            else => unreachable,
+        };
     }
 } else struct {};
 
@@ -786,4 +885,34 @@ test "window flags map to the RGFW ABI" {
 test "event kinds preserve unknown values" {
     const unknown: EventKind = @enumFromInt(255);
     try std.testing.expectEqual(@as(u8, 255), @intFromEnum(unknown));
+}
+
+test "Vulkan foreign handles preserve their ABI representation" {
+    if (!features.vulkan) return;
+
+    const ForeignInstanceOpaque = opaque {};
+    const ForeignSurfaceOpaque = opaque {};
+    const ForeignInstance = ?*ForeignInstanceOpaque;
+    const ForeignSurface = ?*ForeignSurfaceOpaque;
+
+    try std.testing.expect(Vulkan.handlesAreCompatible(ForeignInstance, Vulkan.Instance));
+    try std.testing.expect(Vulkan.handlesAreCompatible(ForeignSurface, Vulkan.Surface));
+    try std.testing.expect(!Vulkan.handlesAreCompatible(u32, Vulkan.Instance));
+    try std.testing.expect(!Vulkan.handlesAreCompatible(?*u8, Vulkan.Instance));
+
+    const foreign_instance: ForeignInstance = @ptrFromInt(0x1000);
+    const native_instance = Vulkan.castCompatibleHandle(Vulkan.Instance, foreign_instance);
+    const instance_round_trip = Vulkan.castCompatibleHandle(ForeignInstance, native_instance);
+    try std.testing.expectEqual(
+        @intFromPtr(foreign_instance.?),
+        @intFromPtr(instance_round_trip.?),
+    );
+
+    const native_surface: Vulkan.Surface = @ptrFromInt(0x2000);
+    const foreign_surface = Vulkan.castCompatibleHandle(ForeignSurface, native_surface);
+    const surface_round_trip = Vulkan.castCompatibleHandle(Vulkan.Surface, foreign_surface);
+    try std.testing.expectEqual(
+        @intFromPtr(native_surface.?),
+        @intFromPtr(surface_round_trip.?),
+    );
 }

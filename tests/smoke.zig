@@ -37,5 +37,6 @@ test "Vulkan declarations and helpers follow the feature option" {
     try std.testing.expect(@hasDecl(rgfw.raw, "RGFW_window_createSurface_Vulkan"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "requiredInstanceExtensions"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "createSurface"));
+    try std.testing.expect(@hasDecl(rgfw.Vulkan, "createSurfaceAs"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "presentationSupported"));
 }

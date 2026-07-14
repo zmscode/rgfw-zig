@@ -10,6 +10,9 @@ Zig 0.16 bindings for [RGFW](https://github.com/ColleagueRiley/RGFW). The packag
 
 Normal builds use the vendored header and do not need Git or network access.
 
+AI coding agents can use the repository's installable [`rgfw-zig` skill](SKILL.md) for concise,
+version-specific integration and validation guidance.
+
 ## Use as a dependency
 
 Add the package to your application's `build.zig.zon` with Zig 0.16:
@@ -159,6 +162,24 @@ const extensions = rgfw.Vulkan.requiredInstanceExtensions();
 // Enable `extensions` while creating your VkInstance, then:
 const surface = try rgfw.Vulkan.createSurface(&window, instance);
 ```
+
+When another Zig package owns independently translated Vulkan handle types, use the checked
+interop boundary instead of scattering `@ptrCast` calls through application code. For example,
+with `vk-zig`'s explicit raw-handle accessor:
+
+```zig
+const surface: vk.raw.VkSurfaceKHR = try rgfw.Vulkan.createSurfaceAs(
+    vk.raw.VkSurfaceKHR,
+    &window,
+    instance.rawHandle(),
+);
+```
+
+`createSurfaceAs` accepts only opaque pointer handles (or the target platform's unsigned integer
+Vulkan handle representation) with the same size and representation as RGFW's handle. The ABI
+reinterpretation does not transfer ownership: the application must destroy the returned surface
+through the Vulkan instance that created it. `rgfw-zig` does not import `vk-zig`, so neither package
+introduces a dependency cycle.
 
 Use `zig build -Dvulkan=true` when building this repository directly. Vulkan declarations are
 also available through `rgfw.raw` when the option is enabled.

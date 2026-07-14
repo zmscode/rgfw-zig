@@ -23,6 +23,8 @@
         "tests",
         "tools",
         "vendor",
+        "agents",
+        "SKILL.md",
         "LICENSE",
         "README.md",
     },

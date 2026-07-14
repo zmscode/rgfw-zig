@@ -1,0 +1,4 @@
+interface:
+  display_name: "RGFW Zig"
+  short_description: "Build Zig applications with RGFW bindings"
+  default_prompt: "Use $rgfw-zig to integrate RGFW into this Zig application."
