@@ -12,8 +12,5 @@ pub fn main() !void {
     });
     defer window.deinit();
 
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
-        while (window.nextEvent()) |_| {}
-    }
+    while (window.isOpen()) window.pumpEvents();
 }

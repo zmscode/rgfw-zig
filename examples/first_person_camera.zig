@@ -20,8 +20,8 @@ pub fn main() !void {
     defer window.setRawMouseMode(false);
 
     rgfw.OpenGL.makeCurrent(&window);
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
+    while (window.isOpen()) {
+        window.pumpEvents();
         var movement: f32 = 0;
         if (window.keyDown(.w)) movement += 0.2;
         if (window.keyDown(.s)) movement -= 0.2;

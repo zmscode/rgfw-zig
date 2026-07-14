@@ -56,15 +56,14 @@ pub fn main() !void {
     });
     defer window.deinit();
 
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
-        while (window.nextEvent()) |_| {}
-    }
+    while (window.isOpen()) window.pumpEvents();
 }
 ```
 
-RGFW marks the window as closing before it emits `.window_close`, so that event does not need to
-call `requestClose()`. Use `requestClose()` when application logic wants to initiate shutdown.
+`pumpEvents()` is the concise path when an application only needs RGFW's window and input state.
+To inspect individual events, use `rgfw.pollEvents()` followed by `window.nextEvent()`. RGFW marks
+the window as closing before it emits `.window_close`, so that event does not need to call
+`requestClose()`. Use `requestClose()` when application logic wants to initiate shutdown.
 
 The mechanically translated ABI remains available as `rgfw.raw`, or as the dependency module
 `rgfw-raw` when a consumer wants to import it separately. See

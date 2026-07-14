@@ -25,9 +25,8 @@ pub fn run(title: [:0]const u8, draw: *const fn ([]u8, u32) void) !void {
     defer surface.deinit();
 
     var frame_index: u32 = 0;
-    while (!window.shouldClose()) : (frame_index +%= 1) {
-        rgfw.pollEvents();
-        while (window.nextEvent()) |_| {}
+    while (window.isOpen()) : (frame_index +%= 1) {
+        window.pumpEvents();
         draw(pixels, frame_index);
         surface.blit(&window);
     }

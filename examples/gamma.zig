@@ -13,8 +13,8 @@ pub fn main() !void {
     defer _ = monitor.setGamma(1.0);
 
     rgfw.OpenGL.makeCurrent(&window);
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
+    while (window.isOpen()) {
+        window.pumpEvents();
         gl.clear(&window, .{ 0.20, 0.20, 0.20, 1.0 });
         rgfw.OpenGL.swapBuffers(&window);
     }

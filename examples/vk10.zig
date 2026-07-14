@@ -59,10 +59,7 @@ pub fn main() !void {
     ) orelse return error.VulkanEntryPointMissing;
     defer destroy_surface(instance, surface, null);
 
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
-        while (window.nextEvent()) |_| {}
-    }
+    while (window.isOpen()) window.pumpEvents();
 }
 
 fn load(

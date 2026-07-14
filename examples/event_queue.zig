@@ -9,7 +9,7 @@ pub fn main() !void {
     });
     defer window.deinit();
 
-    while (!window.shouldClose()) {
+    while (window.isOpen()) {
         rgfw.waitForNextEvent();
         while (window.nextEvent()) |event| {
             std.debug.print("Queued event: {s}\n", .{@tagName(event.kind())});

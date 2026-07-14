@@ -20,7 +20,7 @@ pub fn main() !void {
     });
     defer second.deinit();
 
-    while (!first.shouldClose() and !second.shouldClose()) {
+    while (first.isOpen() and second.isOpen()) {
         rgfw.pollEvents();
         processEvents(&first);
         processEvents(&second);
@@ -28,5 +28,5 @@ pub fn main() !void {
 }
 
 fn processEvents(window: *rgfw.Window) void {
-    while (window.nextEvent()) |_| {}
+    window.discardEvents();
 }

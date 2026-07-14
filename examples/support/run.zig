@@ -13,9 +13,8 @@ pub fn window(
     var app_window = try context.createWindow(title, options);
     defer app_window.deinit();
 
-    while (!app_window.shouldClose()) {
-        rgfw.pollEvents();
-        while (app_window.nextEvent()) |_| {}
+    while (app_window.isOpen()) {
+        app_window.pumpEvents();
         if (frame) |update| update(&app_window);
     }
 }
@@ -35,9 +34,8 @@ pub fn openGL(
 
     rgfw.OpenGL.makeCurrent(&app_window);
     rgfw.OpenGL.swapInterval(&app_window, 1);
-    while (!app_window.shouldClose()) {
-        rgfw.pollEvents();
-        while (app_window.nextEvent()) |_| {}
+    while (app_window.isOpen()) {
+        app_window.pumpEvents();
         if (frame) |update| update(&app_window);
         rgfw.OpenGL.swapBuffers(&app_window);
     }
@@ -58,9 +56,8 @@ pub fn egl(
 
     rgfw.EGL.makeCurrent(&app_window);
     rgfw.EGL.swapInterval(&app_window, 1);
-    while (!app_window.shouldClose()) {
-        rgfw.pollEvents();
-        while (app_window.nextEvent()) |_| {}
+    while (app_window.isOpen()) {
+        app_window.pumpEvents();
         if (frame) |update| update(&app_window);
         rgfw.EGL.swapBuffers(&app_window);
     }

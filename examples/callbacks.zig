@@ -25,10 +25,7 @@ pub fn main() !void {
         _ = raw.RGFW_setEventCallback(event_type, eventCallback);
     }
 
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
-        while (window.nextEvent()) |_| {}
-    }
+    while (window.isOpen()) window.pumpEvents();
 }
 
 fn eventCallback(event: [*c]const rgfw.raw.RGFW_event) callconv(.c) void {

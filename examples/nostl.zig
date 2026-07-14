@@ -10,7 +10,5 @@ pub fn main() !void {
         .flags = .{ .centered = true, .no_resize = true },
     });
     defer window.deinit();
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
-    }
+    while (window.isOpen()) window.pumpEvents();
 }

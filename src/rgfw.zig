@@ -187,6 +187,10 @@ pub const Window = struct {
         return raw.RGFW_window_shouldClose(handle) != 0;
     }
 
+    pub fn isOpen(window: *const Window) bool {
+        return !window.shouldClose();
+    }
+
     pub fn requestClose(window: *Window) void {
         const handle = window.handle orelse return;
         if (raw.RGFW_window_shouldClose(handle) != 0) return;
@@ -396,6 +400,20 @@ pub const Window = struct {
         var event: raw.RGFW_event = undefined;
         if (raw.RGFW_window_checkEvent(handle, &event) == 0) return null;
         return .{ .raw_event = event };
+    }
+
+    /// Polls the platform once and discards queued event payloads after RGFW updates its state.
+    pub fn pumpEvents(window: *Window) void {
+        if (window.handle == null) return;
+        raw.RGFW_pollEvents();
+        window.discardEvents();
+    }
+
+    /// Discards currently queued event payloads without polling the platform.
+    pub fn discardEvents(window: *Window) void {
+        const handle = window.handle orelse return;
+        var event: raw.RGFW_event = undefined;
+        while (raw.RGFW_window_checkQueuedEvent(handle, &event) != 0) {}
     }
 };
 

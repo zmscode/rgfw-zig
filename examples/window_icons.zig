@@ -19,7 +19,7 @@ pub fn main() !void {
         @intCast(rgfw.raw.RGFW_iconBoth),
     ) == 0) return error.IconAssignmentFailed;
 
-    while (!window.shouldClose()) rgfw.pollEvents();
+    while (window.isOpen()) window.pumpEvents();
 }
 
 const icon_size: usize = 16;

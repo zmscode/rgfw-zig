@@ -14,6 +14,12 @@ test "window flags can be combined from Zig" {
     try std.testing.expect(raw_flags != 0);
 }
 
+test "idiomatic window event helpers are available" {
+    try std.testing.expect(@hasDecl(rgfw.Window, "isOpen"));
+    try std.testing.expect(@hasDecl(rgfw.Window, "pumpEvents"));
+    try std.testing.expect(@hasDecl(rgfw.Window, "discardEvents"));
+}
+
 test "raw bindings contain no eager translation failures" {
     try std.testing.expect(!@hasDecl(rgfw.raw, "RGFWDEF"));
     try std.testing.expect(!@hasDecl(rgfw.raw, "RGFW_ENUM"));

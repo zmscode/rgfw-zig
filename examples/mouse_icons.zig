@@ -20,9 +20,8 @@ pub fn main() !void {
         return error.MouseAssignmentFailed;
     }
 
-    while (!window.shouldClose()) {
-        rgfw.pollEvents();
-        while (window.nextEvent()) |_| {}
+    while (window.isOpen()) {
+        window.pumpEvents();
         if (window.keyPressed(.space)) window.showMouse(false);
         if (window.keyReleased(.space)) window.showMouse(true);
     }
