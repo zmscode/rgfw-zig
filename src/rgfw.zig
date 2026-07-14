@@ -9,13 +9,18 @@ pub const features: Features = .{
     .egl = build_options.egl,
     .vulkan = build_options.vulkan,
     .debug = build_options.rgfw_debug,
+    .window_system = build_options.window_system,
 };
+
+pub const WindowSystem = @TypeOf(build_options.window_system);
+pub const window_system: WindowSystem = build_options.window_system;
 
 pub const Features = struct {
     opengl: bool,
     egl: bool,
     vulkan: bool,
     debug: bool,
+    window_system: WindowSystem,
 };
 
 pub const Backend = enum {
@@ -27,6 +32,7 @@ pub const Backend = enum {
 
 pub const InitOptions = struct {
     backend: Backend = .none,
+    diagnostic_handler: ?DiagnosticHandler = null,
 };
 
 pub const InitError = error{
@@ -34,12 +40,123 @@ pub const InitError = error{
     InitializationFailed,
 };
 
+pub const InitializationFailure = struct {
+    status: i32,
+    backend: Backend,
+    window_system: WindowSystem,
+};
+
+pub const InitializationWarning = struct {
+    status: i32,
+    window_system: WindowSystem,
+};
+
+pub const InitResult = union(enum) {
+    context: Context,
+    failure: InitializationFailure,
+};
+
+pub const DiagnosticSeverity = enum(raw.RGFW_debugType) {
+    err = raw.RGFW_typeError,
+    warning = raw.RGFW_typeWarning,
+    info = raw.RGFW_typeInfo,
+    _,
+};
+
+pub const DiagnosticCode = enum(raw.RGFW_errorCode) {
+    none = raw.RGFW_noError,
+    out_of_memory = raw.RGFW_errOutOfMemory,
+    opengl_context = raw.RGFW_errOpenGLContext,
+    egl_context = raw.RGFW_errEGLContext,
+    wayland = raw.RGFW_errWayland,
+    x11 = raw.RGFW_errX11,
+    directx_context = raw.RGFW_errDirectXContext,
+    iokit = raw.RGFW_errIOKit,
+    clipboard = raw.RGFW_errClipboard,
+    failed_function_load = raw.RGFW_errFailedFuncLoad,
+    buffer = raw.RGFW_errBuffer,
+    metal = raw.RGFW_errMetal,
+    platform = raw.RGFW_errPlatform,
+    event_queue = raw.RGFW_errEventQueue,
+    not_initialized = raw.RGFW_errNoInit,
+    window_info = raw.RGFW_infoWindow,
+    buffer_info = raw.RGFW_infoBuffer,
+    global_info = raw.RGFW_infoGlobal,
+    opengl_info = raw.RGFW_infoOpenGL,
+    wayland_warning = raw.RGFW_warningWayland,
+    opengl_warning = raw.RGFW_warningOpenGL,
+    _,
+};
+
+pub const Diagnostic = struct {
+    severity: DiagnosticSeverity,
+    code: DiagnosticCode,
+    message: []const u8,
+};
+
+pub const DiagnosticHandler = struct {
+    context: ?*anyopaque,
+    dispatch: *const fn (?*anyopaque, Diagnostic) void,
+
+    pub fn fromHandler(comptime handler: anytype) DiagnosticHandler {
+        if (@TypeOf(handler) != fn (Diagnostic) void) {
+            @compileError("diagnostic handler must have type `fn (rgfw.Diagnostic) void`");
+        }
+        const Adapter = struct {
+            fn dispatch(_: ?*anyopaque, diagnostic: Diagnostic) void {
+                handler(diagnostic);
+            }
+        };
+        return .{ .context = null, .dispatch = Adapter.dispatch };
+    }
+
+    pub fn fromHandlerWithContext(context: anytype, comptime handler: anytype) DiagnosticHandler {
+        const ContextPointer = @TypeOf(context);
+        comptime requireContextPointer(ContextPointer, "diagnostic handler context");
+        if (@TypeOf(handler) != fn (ContextPointer, Diagnostic) void) {
+            @compileError("diagnostic handler must accept its context pointer and rgfw.Diagnostic");
+        }
+        const Adapter = struct {
+            fn dispatch(erased: ?*anyopaque, diagnostic: Diagnostic) void {
+                handler(@ptrCast(@alignCast(erased.?)), diagnostic);
+            }
+        };
+        return .{ .context = @ptrCast(context), .dispatch = Adapter.dispatch };
+    }
+};
+
+var active_diagnostic_handler: ?DiagnosticHandler = null;
+
+fn diagnosticCallback(info: [*c]const raw.RGFW_debugInfo) callconv(.c) void {
+    if (info == null) return;
+    const handler = active_diagnostic_handler orelse return;
+    const message = if (info.*.msg == null)
+        ""
+    else
+        std.mem.span(@as([*:0]const u8, @ptrCast(info.*.msg)));
+    handler.dispatch(handler.context, .{
+        .severity = @enumFromInt(info.*.type),
+        .code = @enumFromInt(info.*.code),
+        .message = message,
+    });
+}
+
 pub const Context = struct {
     active: bool = true,
+    warning: ?InitializationWarning = null,
     warning_code: ?i32 = null,
+    previous_debug_callback: raw.RGFW_debugFunc = null,
+    previous_diagnostic_handler: ?DiagnosticHandler = null,
+    owns_diagnostic_handler: bool = false,
 
     pub fn deinit(context: *Context) void {
         if (!context.active) return;
+        if (context.owns_diagnostic_handler) {
+            _ = raw.RGFW_setDebugCallback(context.previous_debug_callback);
+            active_diagnostic_handler = context.previous_diagnostic_handler;
+            context.owns_diagnostic_handler = false;
+        }
+        for (&event_handler_slots) |*slot| slot.* = null;
         raw.RGFW_deinit();
         context.active = false;
     }
@@ -64,9 +181,35 @@ pub const Context = struct {
         std.debug.assert(context.active);
         raw.RGFW_waitForEvent(@intCast(raw.RGFW_eventWaitNext));
     }
+
+    pub fn on(
+        context: *const Context,
+        comptime descriptor: anytype,
+        comptime handler: anytype,
+    ) HandleError!EventSubscription {
+        if (!context.active) return error.InactiveObject;
+        return EventSubscription.install(descriptor, null, handler);
+    }
+
+    pub fn onWithContext(
+        context: *const Context,
+        comptime descriptor: anytype,
+        handler_context: anytype,
+        comptime handler: anytype,
+    ) HandleError!EventSubscription {
+        if (!context.active) return error.InactiveObject;
+        return EventSubscription.install(descriptor, handler_context, handler);
+    }
 };
 
 pub fn init(class_name: [:0]const u8, options: InitOptions) InitError!Context {
+    return switch (try initResult(class_name, options)) {
+        .context => |context| context,
+        .failure => error.InitializationFailed,
+    };
+}
+
+pub fn initResult(class_name: [:0]const u8, options: InitOptions) InitError!InitResult {
     const flags: raw.RGFW_initFlags = switch (options.backend) {
         .none => 0,
         .opengl => if (features.opengl)
@@ -84,8 +227,26 @@ pub fn init(class_name: [:0]const u8, options: InitOptions) InitError!Context {
     };
 
     const status = raw.RGFW_init(class_name.ptr, flags);
-    if (status < 0) return error.InitializationFailed;
-    return .{ .warning_code = if (status > 0) status else null };
+    if (status < 0) return .{ .failure = .{
+        .status = status,
+        .backend = options.backend,
+        .window_system = window_system,
+    } };
+
+    var context: Context = .{
+        .warning = if (status > 0) .{
+            .status = status,
+            .window_system = window_system,
+        } else null,
+        .warning_code = if (status > 0) status else null,
+    };
+    if (options.diagnostic_handler) |handler| {
+        context.previous_diagnostic_handler = active_diagnostic_handler;
+        active_diagnostic_handler = handler;
+        context.previous_debug_callback = raw.RGFW_setDebugCallback(diagnosticCallback);
+        context.owns_diagnostic_handler = true;
+    }
+    return .{ .context = context };
 }
 
 pub fn pollEvents() void {
@@ -154,6 +315,37 @@ pub const Clipboard = struct {
     }
 };
 
+pub const HandleError = error{
+    InactiveObject,
+    NativeHandleUnavailable,
+};
+
+pub const CocoaWindowHandle = struct {
+    window: *anyopaque,
+    view: *anyopaque,
+};
+
+pub const Win32WindowHandle = struct {
+    hwnd: *anyopaque,
+    hdc: *anyopaque,
+};
+
+pub const NativeWindowHandle = union(WindowSystem) {
+    cocoa: CocoaWindowHandle,
+    win32: Win32WindowHandle,
+    x11: u64,
+    wayland: *anyopaque,
+};
+
+pub fn NativeWindowHandleType(comptime kind: WindowSystem) type {
+    return switch (kind) {
+        .cocoa => CocoaWindowHandle,
+        .win32 => Win32WindowHandle,
+        .x11 => u64,
+        .wayland => *anyopaque,
+    };
+}
+
 pub const Window = struct {
     handle: ?*raw.RGFW_window,
 
@@ -198,6 +390,52 @@ pub const Window = struct {
         const handle = window.handle orelse return;
         raw.RGFW_window_close(handle);
         window.handle = null;
+    }
+
+    pub fn rawHandle(window: *const Window) HandleError!*raw.RGFW_window {
+        return window.handle orelse error.InactiveObject;
+    }
+
+    pub fn nativeHandle(window: *const Window) HandleError!NativeWindowHandle {
+        return switch (window_system) {
+            inline else => |kind| @unionInit(
+                NativeWindowHandle,
+                @tagName(kind),
+                try window.nativeHandleAs(kind),
+            ),
+        };
+    }
+
+    pub fn nativeHandleAs(
+        window: *const Window,
+        comptime kind: WindowSystem,
+    ) HandleError!NativeWindowHandleType(kind) {
+        if (kind != window_system) {
+            @compileError("native handle kind `" ++ @tagName(kind) ++
+                "` does not match configured window system `" ++ @tagName(window_system) ++ "`");
+        }
+        const handle = try window.rawHandle();
+        return switch (kind) {
+            .cocoa => .{
+                .window = raw.RGFW_window_getWindow_OSX(handle) orelse
+                    return error.NativeHandleUnavailable,
+                .view = raw.RGFW_window_getView_OSX(handle) orelse
+                    return error.NativeHandleUnavailable,
+            },
+            .win32 => .{
+                .hwnd = raw.RGFW_window_getHWND(handle) orelse
+                    return error.NativeHandleUnavailable,
+                .hdc = raw.RGFW_window_getHDC(handle) orelse
+                    return error.NativeHandleUnavailable,
+            },
+            .x11 => blk: {
+                const native = raw.RGFW_window_getWindow_X11(handle);
+                if (native == 0) return error.NativeHandleUnavailable;
+                break :blk native;
+            },
+            .wayland => raw.RGFW_window_getWindow_Wayland(handle) orelse
+                return error.NativeHandleUnavailable,
+        };
     }
 
     pub fn shouldClose(window: *const Window) bool {
@@ -785,6 +1023,10 @@ pub const Surface = struct {
         surface.handle = null;
     }
 
+    pub fn rawHandle(surface: *const Surface) HandleError!*raw.RGFW_surface {
+        return surface.handle orelse error.InactiveObject;
+    }
+
     pub fn blit(surface: *const Surface, window: *const Window) void {
         const surface_handle = surface.handle orelse return;
         const window_handle = window.handle orelse return;
@@ -794,6 +1036,10 @@ pub const Surface = struct {
 
 pub const Monitor = struct {
     handle: *raw.RGFW_monitor,
+
+    pub fn rawHandle(monitor: *const Monitor) *raw.RGFW_monitor {
+        return monitor.handle;
+    }
 
     pub fn name(monitor: *const Monitor) [:0]const u8 {
         const name_ptr = raw.RGFW_monitor_getName(monitor.handle);
@@ -1190,6 +1436,212 @@ pub const EventKind = enum(u8) {
     _,
 };
 
+fn EventDescriptor(comptime event_kind: EventKind, comptime PayloadType: type) type {
+    return struct {
+        pub const kind = event_kind;
+        pub const Payload = PayloadType;
+    };
+}
+
+/// Typed callback descriptors accepted by `Context.on` and `Context.onWithContext`.
+pub const callback = struct {
+    pub const key_pressed = EventDescriptor(.key_pressed, KeyEvent){};
+    pub const key_released = EventDescriptor(.key_released, KeyEvent){};
+    pub const key_character = EventDescriptor(.key_character, u32){};
+    pub const mouse_button_pressed = EventDescriptor(.mouse_button_pressed, MouseButton){};
+    pub const mouse_button_released = EventDescriptor(.mouse_button_released, MouseButton){};
+    pub const mouse_scroll = EventDescriptor(.mouse_scroll, Vector){};
+    pub const mouse_motion = EventDescriptor(.mouse_motion, MouseMotionEvent){};
+    pub const mouse_raw_motion = EventDescriptor(.mouse_raw_motion, Vector){};
+    pub const mouse_enter = EventDescriptor(.mouse_enter, void){};
+    pub const mouse_leave = EventDescriptor(.mouse_leave, void){};
+    pub const window_moved = EventDescriptor(.window_moved, Point){};
+    pub const window_resized = EventDescriptor(.window_resized, Size){};
+    pub const window_focus_in = EventDescriptor(.window_focus_in, void){};
+    pub const window_focus_out = EventDescriptor(.window_focus_out, void){};
+    pub const window_refresh = EventDescriptor(.window_refresh, Rect){};
+    pub const window_close = EventDescriptor(.window_close, void){};
+    pub const window_maximized = EventDescriptor(.window_maximized, void){};
+    pub const window_minimized = EventDescriptor(.window_minimized, void){};
+    pub const window_restored = EventDescriptor(.window_restored, void){};
+    pub const data_drop = EventDescriptor(.data_drop, DataDrop){};
+    pub const data_drag = EventDescriptor(.data_drag, DataDragEvent){};
+    pub const scale_updated = EventDescriptor(.scale_updated, Vector){};
+    pub const monitor_connected = EventDescriptor(.monitor_connected, ?Monitor){};
+    pub const monitor_disconnected = EventDescriptor(.monitor_disconnected, ?Monitor){};
+};
+
+const EventHandlerSlot = struct {
+    context: ?*anyopaque,
+    dispatch: *const fn (?*anyopaque, *const Event) void,
+    generation: u64,
+};
+
+var event_handler_slots: [raw.RGFW_eventCount]?EventHandlerSlot =
+    @splat(@as(?EventHandlerSlot, null));
+var event_handler_generation: u64 = 0;
+
+pub const EventSubscription = struct {
+    kind: EventKind,
+    previous_callback: raw.RGFW_genericFunc,
+    previous_slot: ?EventHandlerSlot,
+    generation: u64,
+    active: bool = true,
+
+    fn install(
+        comptime descriptor: anytype,
+        handler_context: anytype,
+        comptime handler: anytype,
+    ) EventSubscription {
+        const Descriptor = @TypeOf(descriptor);
+        if (!@hasDecl(Descriptor, "kind") or !@hasDecl(Descriptor, "Payload")) {
+            @compileError("expected an rgfw.callback event descriptor");
+        }
+        const Payload = Descriptor.Payload;
+        const ContextPointer = @TypeOf(handler_context);
+        const Adapter = if (ContextPointer == @TypeOf(null)) struct {
+            fn dispatch(_: ?*anyopaque, incoming: *const Event) void {
+                if (Payload == void) {
+                    handler();
+                } else {
+                    handler(eventPayloadAs(Descriptor.kind, Payload, incoming));
+                }
+            }
+        } else struct {
+            fn dispatch(erased: ?*anyopaque, incoming: *const Event) void {
+                const typed_context: ContextPointer = @ptrCast(@alignCast(erased.?));
+                if (Payload == void) {
+                    handler(typed_context);
+                } else {
+                    handler(typed_context, eventPayloadAs(Descriptor.kind, Payload, incoming));
+                }
+            }
+        };
+
+        comptime validateEventHandler(descriptor, ContextPointer, handler);
+        event_handler_generation = std.math.add(
+            u64,
+            event_handler_generation,
+            1,
+        ) catch @panic("RGFW event handler generation overflow");
+        const index = eventIndex(Descriptor.kind);
+        const previous_slot = event_handler_slots[index];
+        event_handler_slots[index] = .{
+            .context = if (ContextPointer == @TypeOf(null)) null else @ptrCast(handler_context),
+            .dispatch = Adapter.dispatch,
+            .generation = event_handler_generation,
+        };
+        const previous_callback = raw.RGFW_setEventCallback(
+            @intFromEnum(Descriptor.kind),
+            eventCallback,
+        );
+        return .{
+            .kind = Descriptor.kind,
+            .previous_callback = previous_callback,
+            .previous_slot = previous_slot,
+            .generation = event_handler_generation,
+        };
+    }
+
+    pub fn deinit(subscription: *EventSubscription) void {
+        if (!subscription.active) return;
+        const index = eventIndex(subscription.kind);
+        const current = event_handler_slots[index] orelse
+            @panic("RGFW event handler was removed out of order");
+        if (current.generation != subscription.generation) {
+            @panic("RGFW event handler was removed out of order");
+        }
+        _ = raw.RGFW_setEventCallback(
+            @intFromEnum(subscription.kind),
+            subscription.previous_callback,
+        );
+        event_handler_slots[index] = subscription.previous_slot;
+        subscription.active = false;
+    }
+};
+
+fn eventCallback(incoming: [*c]const raw.RGFW_event) callconv(.c) void {
+    if (incoming == null) return;
+    const raw_kind = incoming.*.type;
+    if (raw_kind == raw.RGFW_eventNone or raw_kind >= raw.RGFW_eventCount) return;
+    const slot = event_handler_slots[@intCast(raw_kind)] orelse return;
+    const wrapped: Event = .{ .raw_value = incoming.* };
+    slot.dispatch(slot.context, &wrapped);
+}
+
+fn eventIndex(kind: EventKind) usize {
+    const index: usize = @intFromEnum(kind);
+    std.debug.assert(index > raw.RGFW_eventNone);
+    std.debug.assert(index < raw.RGFW_eventCount);
+    return index;
+}
+
+fn validateEventHandler(
+    comptime descriptor: anytype,
+    comptime ContextPointer: type,
+    comptime handler: anytype,
+) void {
+    const Payload = @TypeOf(descriptor).Payload;
+    const Expected = if (ContextPointer == @TypeOf(null))
+        if (Payload == void) fn () void else fn (Payload) void
+    else blk: {
+        requireContextPointer(ContextPointer, "event handler context");
+        break :blk if (Payload == void)
+            fn (ContextPointer) void
+        else
+            fn (ContextPointer, Payload) void;
+    };
+    if (@TypeOf(handler) != Expected) {
+        @compileError("event handler must have type `" ++ @typeName(Expected) ++ "`");
+    }
+}
+
+fn requireContextPointer(comptime ContextPointer: type, comptime role: []const u8) void {
+    const pointer = switch (@typeInfo(ContextPointer)) {
+        .pointer => |pointer| pointer,
+        else => @compileError(role ++ " must be a non-optional single-item pointer"),
+    };
+    if (pointer.size != .one or pointer.is_allowzero) {
+        @compileError(role ++ " must be a non-optional single-item pointer");
+    }
+}
+
+fn eventPayloadAs(
+    comptime kind: EventKind,
+    comptime Payload: type,
+    incoming: *const Event,
+) Payload {
+    const payload = incoming.payload();
+    return switch (kind) {
+        .key_pressed => payload.key_pressed,
+        .key_released => payload.key_released,
+        .key_character => payload.key_character,
+        .mouse_button_pressed => payload.mouse_button_pressed,
+        .mouse_button_released => payload.mouse_button_released,
+        .mouse_scroll => payload.mouse_scroll,
+        .mouse_motion => payload.mouse_motion,
+        .mouse_raw_motion => payload.mouse_raw_motion,
+        .window_moved => payload.window_moved,
+        .window_resized => payload.window_resized,
+        .window_refresh => payload.window_refresh,
+        .data_drop => payload.data_drop,
+        .data_drag => payload.data_drag,
+        .scale_updated => payload.scale_updated,
+        .monitor_connected => payload.monitor_connected,
+        .monitor_disconnected => payload.monitor_disconnected,
+        .mouse_enter,
+        .mouse_leave,
+        .window_focus_in,
+        .window_focus_out,
+        .window_close,
+        .window_maximized,
+        .window_minimized,
+        .window_restored,
+        => @compileError("void event payloads are dispatched without a payload argument"),
+        else => @compileError("event descriptor has no typed payload mapping"),
+    };
+}
+
 pub const Vulkan = if (features.vulkan) struct {
     pub const Instance = raw.VkInstance;
     pub const PhysicalDevice = raw.VkPhysicalDevice;
@@ -1199,6 +1651,7 @@ pub const Vulkan = if (features.vulkan) struct {
     pub const SurfaceError = error{
         InvalidInstance,
         SurfaceCreationFailed,
+        SurfaceOwnershipUnavailable,
     };
 
     const HandleRepresentation = enum {
@@ -1236,6 +1689,13 @@ pub const Vulkan = if (features.vulkan) struct {
         return sentinel_ptrs[0..count];
     }
 
+    /// Appends RGFW's borrowed names to an extension set such as vk-zig's ExtensionSet.
+    pub fn appendRequiredInstanceExtensions(extension_set: anytype) @TypeOf(
+        extension_set.appendPointerNames(requiredInstanceExtensionPointers()),
+    ) {
+        return extension_set.appendPointerNames(requiredInstanceExtensionPointers());
+    }
+
     pub fn createSurface(
         window: *const Window,
         instance: Instance,
@@ -1267,6 +1727,25 @@ pub const Vulkan = if (features.vulkan) struct {
         const instance: Instance = castCompatibleHandle(Instance, foreign_instance);
         const surface = try createSurface(window, instance);
         return castCompatibleHandle(ForeignSurface, surface);
+    }
+
+    /// Creates an RGFW surface and hands ownership directly to a foreign instance wrapper.
+    /// The wrapper must provide `rawHandle` and `adoptSurface` methods, as vk-zig does.
+    pub fn createOwnedSurfaceAs(
+        comptime ForeignSurface: type,
+        window: *const Window,
+        foreign_instance_owner: anytype,
+    ) OwnedSurfaceResult(@TypeOf(foreign_instance_owner)) {
+        const foreign_instance = try foreign_instance_owner.rawHandle();
+        const instance: Instance = castCompatibleHandle(Instance, foreign_instance);
+        const destroy_surface = loadDestroySurface(instance) orelse
+            return error.SurfaceOwnershipUnavailable;
+        const native_surface = try createSurface(window, instance);
+        const surface = castCompatibleHandle(ForeignSurface, native_surface);
+        return foreign_instance_owner.adoptSurface(surface, null) catch |adopt_error| {
+            destroy_surface(instance, native_surface, null);
+            return adopt_error;
+        };
     }
 
     pub fn presentationSupported(
@@ -1350,7 +1829,45 @@ pub const Vulkan = if (features.vulkan) struct {
             else => unreachable,
         };
     }
-} else struct {};
+
+    const DestroySurfaceFunction = @typeInfo(raw.PFN_vkDestroySurfaceKHR).optional.child;
+
+    fn loadDestroySurface(instance: Instance) ?DestroySurfaceFunction {
+        const generic = raw.RGFW_getInstanceProcAddress_Vulkan(
+            instance,
+            "vkDestroySurfaceKHR",
+        ) orelse return null;
+        return @ptrCast(generic);
+    }
+
+    fn OwnedSurfaceResult(comptime OwnerPointer: type) type {
+        const Owner = switch (@typeInfo(OwnerPointer)) {
+            .pointer => |pointer| if (pointer.size == .one)
+                pointer.child
+            else
+                @compileError("foreign Vulkan instance owner must be a single-item pointer"),
+            else => @compileError("foreign Vulkan instance owner must be a single-item pointer"),
+        };
+        if (!@hasDecl(Owner, "rawHandle") or !@hasDecl(Owner, "adoptSurface")) {
+            @compileError("foreign Vulkan instance owner must provide rawHandle and adoptSurface methods");
+        }
+        const RawResult = @typeInfo(@TypeOf(Owner.rawHandle)).@"fn".return_type.?;
+        const AdoptResult = @typeInfo(@TypeOf(Owner.adoptSurface)).@"fn".return_type.?;
+        const raw_error_union = switch (@typeInfo(RawResult)) {
+            .error_union => |error_union| error_union,
+            else => @compileError("foreign Vulkan rawHandle method must return an error union"),
+        };
+        const adopt_error_union = switch (@typeInfo(AdoptResult)) {
+            .error_union => |error_union| error_union,
+            else => @compileError("foreign Vulkan adoptSurface method must return an error union"),
+        };
+        return (SurfaceError || raw_error_union.error_set || adopt_error_union.error_set)!adopt_error_union.payload;
+    }
+} else struct {
+    pub fn requireEnabled() void {
+        @compileError("RGFW Vulkan support is disabled; pass `.vulkan = true` to the dependency");
+    }
+};
 
 test "window flags map to the RGFW ABI" {
     const flags: WindowFlags = .{

@@ -14,6 +14,16 @@
             .hash = "N-V-__8AAItrbQBen6_Wl2eZ2ax6B0G6qtKys7_uVz224o99",
             .lazy = true,
         },
+        .rgfw_upstream = .{
+            .url = "https://github.com/ColleagueRiley/RGFW/archive/e4db7970bad99a3a51d885290c2d4749f8a49b88.tar.gz",
+            .hash = "N-V-__8AAOZeOAA3GmLsEQnDky9oAPlSM1r5ke5MfZdXOFzT",
+            .lazy = true,
+        },
+        .vulkan = .{
+            .url = "git+https://github.com/zmscode/vk-zig.git#451064cb6e29b762d2d39d277bf02be82afca97f",
+            .hash = "vulkan-0.1.0-wSyCJW3qTwDYHHFJxxjDvntQFnwhMsPd9RcWucue2vBQ",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

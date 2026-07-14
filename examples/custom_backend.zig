@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const rgfw = @import("rgfw");
 
@@ -12,13 +11,12 @@ var printed = false;
 
 fn showNativeHandle(window: *rgfw.Window) void {
     if (printed) return;
-    const handle = window.handle orelse return;
-    switch (builtin.os.tag) {
-        .macos => std.debug.print("NSView: {?}\n", .{rgfw.raw.RGFW_window_getView_OSX(handle)}),
-        .windows => std.debug.print("HWND: {?}\n", .{rgfw.raw.RGFW_window_getHWND(handle)}),
-        else => std.debug.print("X11 window: {d}\n", .{
-            rgfw.raw.RGFW_window_getWindow_X11(handle),
-        }),
+    const native = window.nativeHandle() catch return;
+    switch (native) {
+        .cocoa => |handle| std.debug.print("NSView: {*}\n", .{handle.view}),
+        .win32 => |handle| std.debug.print("HWND: {*}\n", .{handle.hwnd}),
+        .x11 => |handle| std.debug.print("X11 window: {d}\n", .{handle}),
+        .wayland => |handle| std.debug.print("wl_surface: {*}\n", .{handle}),
     }
     printed = true;
 }

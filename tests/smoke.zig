@@ -26,6 +26,82 @@ test "idiomatic window event helpers are available" {
     try std.testing.expect(@hasDecl(rgfw.Window, "discardEvents"));
 }
 
+test "checked handles report inactive wrapper objects" {
+    var window: rgfw.Window = .{ .handle = null };
+    try std.testing.expectError(error.InactiveObject, window.rawHandle());
+    try std.testing.expectError(error.InactiveObject, window.nativeHandle());
+
+    var surface: rgfw.Surface = .{ .handle = null };
+    try std.testing.expectError(error.InactiveObject, surface.rawHandle());
+    try std.testing.expect(@hasDecl(rgfw.Window, "nativeHandle"));
+    try std.testing.expect(@hasDecl(rgfw.Window, "nativeHandleAs"));
+}
+
+fn ignoreWindowClose() void {}
+
+test "typed callback installation checks context lifetime" {
+    var context: rgfw.Context = .{ .active = false };
+    try std.testing.expectError(
+        error.InactiveObject,
+        context.on(rgfw.callback.window_close, ignoreWindowClose),
+    );
+}
+
+test "window system selection is exposed to applications" {
+    const expected: rgfw.WindowSystem = switch (builtin.os.tag) {
+        .macos => .cocoa,
+        .windows => .win32,
+        else => .x11,
+    };
+    try std.testing.expectEqual(expected, rgfw.window_system);
+}
+
+test "typed callback descriptors expose their payload" {
+    try std.testing.expectEqual(rgfw.EventKind.window_resized, @TypeOf(
+        rgfw.callback.window_resized,
+    ).kind);
+    try std.testing.expectEqual(rgfw.Size, @TypeOf(rgfw.callback.window_resized).Payload);
+    try std.testing.expect(@hasDecl(rgfw.Context, "on"));
+    try std.testing.expect(@hasDecl(rgfw.Context, "onWithContext"));
+}
+
+var last_diagnostic: ?rgfw.Diagnostic = null;
+
+fn recordDiagnostic(diagnostic: rgfw.Diagnostic) void {
+    last_diagnostic = diagnostic;
+}
+
+const DiagnosticCounter = struct {
+    count: usize = 0,
+};
+
+fn countDiagnostic(counter: *DiagnosticCounter, _: rgfw.Diagnostic) void {
+    counter.count += 1;
+}
+
+test "diagnostic handlers receive typed messages" {
+    last_diagnostic = null;
+    const handler = rgfw.DiagnosticHandler.fromHandler(recordDiagnostic);
+    handler.dispatch(handler.context, .{
+        .severity = .warning,
+        .code = .platform,
+        .message = "test diagnostic",
+    });
+    const diagnostic = last_diagnostic orelse return error.MissingDiagnostic;
+    try std.testing.expectEqual(rgfw.DiagnosticSeverity.warning, diagnostic.severity);
+    try std.testing.expectEqual(rgfw.DiagnosticCode.platform, diagnostic.code);
+    try std.testing.expectEqualStrings("test diagnostic", diagnostic.message);
+
+    var counter: DiagnosticCounter = .{};
+    const contextual = rgfw.DiagnosticHandler.fromHandlerWithContext(
+        &counter,
+        countDiagnostic,
+    );
+    contextual.dispatch(contextual.context, diagnostic);
+    try std.testing.expectEqual(@as(usize, 1), counter.count);
+    try std.testing.expect(@hasDecl(rgfw, "initResult"));
+}
+
 test "typed events preserve key state and modifiers" {
     var raw_event: rgfw.raw.RGFW_event = undefined;
     raw_event.key = .{
@@ -189,6 +265,8 @@ test "Vulkan declarations and helpers follow the feature option" {
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "requiredInstanceExtensionPointers"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "createSurface"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "createSurfaceAs"));
+    try std.testing.expect(@hasDecl(rgfw.Vulkan, "appendRequiredInstanceExtensions"));
+    try std.testing.expect(@hasDecl(rgfw.Vulkan, "createOwnedSurfaceAs"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "presentationSupported"));
 
     var extensions = rgfw.Vulkan.requiredInstanceExtensions();

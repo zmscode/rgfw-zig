@@ -30,6 +30,10 @@ exe.root_module.addImport("rgfw", dependency.module("rgfw"));
 Enable only required backends with `.opengl = true`, `.egl = true`, or `.vulkan = true`. Enable
 RGFW diagnostics with `.@"rgfw-debug" = true`.
 
+The dependency selects Cocoa on macOS, Win32 on Windows, and X11 on Unix. Select native Wayland
+on Linux with `.@"window-system" = .wayland`. Wayland requires `wayland-scanner`,
+`wayland-client`, `wayland-cursor`, and `xkbcommon` development packages.
+
 ## Create and run a window
 
 Acquire resources next to their `defer` statements:
@@ -59,6 +63,20 @@ scale, drag/drop, and monitor data. `nextQueuedEvent()` explicitly reads only th
 intentional. RGFW already marks the window as closing before emitting `.window_close`; never call
 `requestClose()` in response to that event.
 
+For callback-oriented code, install a typed descriptor and retain its subscription:
+
+```zig
+var resized = try context.on(rgfw.callback.window_resized, onResize);
+defer resized.deinit();
+
+fn onResize(size: rgfw.Size) void {
+    _ = size;
+}
+```
+
+Use `onWithContext` for application state. Do not write `callconv(.c)` adapters for wrapped event
+kinds. Deinitialize subscriptions in reverse installation order before the RGFW context.
+
 For compact, non-exhaustive handlers, use the nullable `Event` accessors: `keyEvent()`,
 `mouseButton()`, `scrollDelta()`, `rawMouseDelta()`, `mousePosition()`, `mouseInWindow()`,
 `focusState()`, `windowPosition()`, `windowSize()`, and `refreshRect()`. Each returns `null` for an
@@ -67,6 +85,22 @@ event kind outside its documented match. Use `rawEvent()` only for data not repr
 Use `window.setCursorMode(.captured)` and `.normal` for first-person pointer ownership rather than
 coordinating raw mode, capture, and visibility separately.
 
+Use `window.rawHandle()` and `surface.rawHandle()` for checked RGFW handles. Use
+`window.nativeHandle()` for a tagged Cocoa, Win32, X11, or Wayland value. Do not read the public
+optional handle fields or call platform-specific raw getters just to determine whether an object is
+active.
+
+Install typed diagnostics through `InitOptions.diagnostic_handler`:
+
+```zig
+.diagnostic_handler = rgfw.DiagnosticHandler.fromHandler(handleDiagnostic),
+```
+
+Handlers receive `rgfw.Diagnostic` with a severity, non-exhaustive code, and borrowed message. Use
+`initResult` when the caller needs the initialization status, backend, and window system on failure.
+RGFW installs custom debug callbacks only after successful initialization, so do not expect the
+typed handler to receive an initialization failure.
+
 ## Select a graphics backend
 
 - OpenGL: enable `.opengl = true`, initialize with `.backend = .opengl`, and create the window with
@@ -74,23 +108,25 @@ coordinating raw mode, capture, and visibility separately.
 - EGL: enable `.egl = true`, initialize with `.backend = .egl`, and create the window with
   `.flags.egl = true`.
 - Vulkan: enable `.vulkan = true` and initialize with `.backend = .vulkan`. Iterate with
-  `var extensions = rgfw.Vulkan.requiredInstanceExtensions()` and repeatedly call
-  `extensions.next()` to obtain sentinel-terminated Zig slices. Enable each before creating the
+  `var extensions = rgfw.Vulkan.requiredInstanceExtensions()` or append the original borrowed
+  pointers directly with `appendRequiredInstanceExtensions`. Enable each before creating the
   instance. macOS uses `VK_EXT_metal_surface` rather than the deprecated MVK surface extension.
 
 For independently translated Vulkan handles such as `vk-zig`, centralize ABI reinterpretation:
 
 ```zig
-const surface: vk.raw.VkSurfaceKHR = try rgfw.Vulkan.createSurfaceAs(
+var surface = try rgfw.Vulkan.createOwnedSurfaceAs(
     vk.raw.VkSurfaceKHR,
     &window,
-    instance.rawHandle(),
+    &instance,
 );
+defer surface.deinit();
 ```
 
 Do not add local Vulkan `@ptrCast` bridges. `createSurfaceAs` validates handle representation and
-size at compile time. It does not transfer ownership; destroy the surface through its Vulkan
-instance.
+size when raw ownership stays with the caller. Prefer `createOwnedSurfaceAs` with vk-zig so its
+`Instance.adoptSurface` owns and destroys the surface. Populate `vk.ExtensionSet` with
+`appendRequiredInstanceExtensions`; do not hand-copy the pointer array.
 
 ## Regenerate and validate
 
@@ -111,7 +147,12 @@ zig build test
 zig build test -Doptimize=ReleaseFast
 zig build test -Dvulkan=true
 zig build examples -Dopengl=true -Degl=true -Dvulkan=true
+zig build examples -Dvulkan=true -Dvk-zig-example=true
 ```
+
+Keep compile-failure cases under `tests/compile_fail` and register them with `expect_errors` in
+`build.zig`. Use these for wrong callback payloads, mismatched native handles, disabled backends,
+and ABI-incompatible Vulkan handles so the intended `@compileError` text remains stable.
 
 Keep generated `.zig-cache`, `zig-out`, and `zig-pkg` content out of commits. Preserve unrelated
 user changes and preserve vendored `RGFW.h` byte-for-byte unless intentionally refreshing it.

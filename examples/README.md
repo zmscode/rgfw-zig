@@ -21,6 +21,7 @@ zig build run-clipboard
 zig build run-gl33 -Dopengl=true
 zig build run-egl -Degl=true
 zig build run-vk10 -Dvulkan=true
+zig build run-vk-zig -Dvulkan=true -Dvk-zig-example=true
 ```
 
 ## Upstream coverage
@@ -61,3 +62,5 @@ zig build run-vk10 -Dvulkan=true
 | `window_icons` | `window_icons.zig` | Base |
 
 `basic.zig` is an additional compact introduction for this package.
+`vk_zig.zig` is an additional optional ownership-integration example enabled with
+`-Dvulkan=true -Dvk-zig-example=true`.

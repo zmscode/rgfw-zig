@@ -93,6 +93,21 @@ For compact handlers, nullable accessors such as `keyEvent()`, `mouseButton()`, 
 `rawMouseDelta()`, `mousePosition()`, `focusState()`, `windowPosition()`, `windowSize()`, and
 `refreshRect()` return `null` when the event kind does not match.
 
+RGFW callbacks can also be installed without exposing a C calling convention or raw event union:
+
+```zig
+var resized = try context.on(rgfw.callback.window_resized, onResize);
+defer resized.deinit();
+
+fn onResize(size: rgfw.Size) void {
+    _ = size;
+}
+```
+
+Use `onWithContext` when a handler needs application state. The descriptor fixes the payload type,
+so a mismatched handler is rejected at compile time. Subscriptions restore the previous RGFW
+callback when deinitialized and should be released in reverse installation order.
+
 Captured first-person input is one state change rather than three independent calls:
 
 ```zig
@@ -127,6 +142,7 @@ zig build examples -Dopengl=true -Dvulkan=true
 # Every example has a named run step.
 zig build run-clipboard
 zig build run-vk10 -Dvulkan=true
+zig build run-vk-zig -Dvulkan=true -Dvk-zig-example=true
 
 # Pull the latest main branch and regenerate/verify the bindings.
 zig build update
@@ -162,8 +178,49 @@ RGFW diagnostics can be enabled in dependency options:
 
 Use `-Drgfw-debug=true` when building this package directly.
 
+Diagnostics can be received as Zig values instead of `RGFW_debugInfo`:
+
+```zig
+var context = try rgfw.init("application", .{
+    .diagnostic_handler = rgfw.DiagnosticHandler.fromHandler(logDiagnostic),
+});
+
+fn logDiagnostic(diagnostic: rgfw.Diagnostic) void {
+    std.log.info("{s}: {s}", .{ @tagName(diagnostic.code), diagnostic.message });
+}
+```
+
+`DiagnosticSeverity` and the non-exhaustive `DiagnosticCode` preserve unknown future RGFW values.
+`initResult` additionally returns an `InitializationFailure` with the raw status, requested backend,
+and selected window system when an application needs more detail than `init`'s error union. RGFW
+only permits replacing its debug callback after initialization, so the typed handler receives
+runtime and shutdown diagnostics; use `initResult` for initialization failures.
+
 EGL is enabled independently with `.egl = true` or `-Degl=true`. Its official Khronos headers are
 downloaded lazily, just like the Vulkan headers.
+
+### Window systems and native handles
+
+The build chooses `.cocoa` on macOS, `.win32` on Windows, and `.x11` on Unix by default. Linux can
+select native Wayland explicitly:
+
+```zig
+const rgfw_dependency = b.dependency("rgfw", .{
+    .target = target,
+    .optimize = optimize,
+    .@"window-system" = .wayland,
+});
+```
+
+The direct command is `zig build -Dtarget=x86_64-linux-gnu -Dwindow-system=wayland`. Wayland builds
+require `wayland-scanner` plus the Wayland client, cursor, and xkbcommon development packages. The
+protocol XML is fetched lazily from the RGFW revision vendored by this package, and generated C
+protocol code stays in Zig's cache.
+
+Use `window.rawHandle()` for checked RGFW FFI access and `window.nativeHandle()` for a tagged
+`NativeWindowHandle`. Cocoa returns the window and view, Win32 returns HWND and HDC, X11 returns its
+window ID, and Wayland returns `wl_surface`. Closed windows and freed software surfaces report
+`error.InactiveObject` rather than requiring optional-field tricks.
 
 ### Vulkan
 
@@ -222,6 +279,30 @@ reinterpretation does not transfer ownership: the application must destroy the r
 through the Vulkan instance that created it. `rgfw-zig` does not import `vk-zig`, so neither package
 introduces a dependency cycle.
 
+With [vk-zig](https://github.com/zmscode/vk-zig), its fixed-capacity extension set accepts RGFW's
+borrowed C names directly and RGFW can transfer the new surface into vk-zig ownership in one call:
+
+```sh
+zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git
+```
+
+```zig
+var extensions: vk.ExtensionSet(4) = .{};
+try rgfw.Vulkan.appendRequiredInstanceExtensions(&extensions);
+try extensions.appendAll(vk.Portability.instanceExtensions());
+
+var surface = try rgfw.Vulkan.createOwnedSurfaceAs(
+    vk.raw.VkSurfaceKHR,
+    &window,
+    &instance,
+);
+defer surface.deinit();
+```
+
+The optional repository example pins vk-zig only for its own build. Normal rgfw-zig consumers do
+not download or import it. Build that example with
+`zig build run-vk-zig -Dvulkan=true -Dvk-zig-example=true`.
+
 Use `zig build -Dvulkan=true` when building this repository directly. Vulkan declarations are
 also available through `rgfw.raw` when the option is enabled.
 
@@ -246,9 +327,13 @@ remaining macro appendix and fails generation if an error appears among actual d
 This leaves the raw module free of `@compileError` placeholders. Useful RGFW constants and enum
 values remain available; `RGFW_TRUE` and `RGFW_FALSE` are restored explicitly.
 
-The package currently configures RGFW for macOS, Windows, and X11-based Unix targets. Linux and
-BSD users need the X11 and XRandR development packages installed. Wayland support requires RGFW's
-generated protocol sources and is not enabled by this first version.
+The test step also compiles intentional failures for wrong callback payloads, mismatched native
+handles, disabled Vulkan use, and ABI-incompatible foreign Vulkan handles. This keeps the wrapper's
+own `@compileError` messages actionable as Zig evolves.
+
+The package configures RGFW for Cocoa, Win32, X11, or Wayland explicitly. Linux and BSD X11 users
+need the X11 and XRandR development packages installed. Linux Wayland users need the tools and
+libraries listed above.
 
 ## Licenses
 
