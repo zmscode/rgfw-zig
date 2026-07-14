@@ -197,8 +197,12 @@ int main() {
 	#define RGFW_WINDOWS
 #endif
 #if defined(RGFW_WAYLAND)
-	#define RGFW_DEBUG /* wayland will be in debug mode by default for now */
-	#define RGFW_UNIX
+	#ifndef RGFW_DEBUG
+		#define RGFW_DEBUG /* wayland will be in debug mode by default for now */
+	#endif
+	#ifndef RGFW_UNIX
+		#define RGFW_UNIX
+	#endif
 	#ifdef RGFW_OPENGL
 		#define RGFW_EGL
 	#endif
@@ -3189,6 +3193,8 @@ struct RGFW_info {
 	#elif defined(RGFW_MACOS)
 		RGFW_key keycodes[128];
 	#elif defined(RGFW_WASM)
+		RGFW_key keycodes[256];
+	#elif defined(RGFW_CUSTOM_BACKEND)
 		RGFW_key keycodes[256];
 	#endif
 
@@ -6403,7 +6409,7 @@ void RGFW_unix_parseURI(RGFW_window* win, char* data) {
 	}
 }
 
-#ifndef RGFW_X11
+#if !defined(RGFW_X11) && defined(RGFW_OPENGL)
 RGFW_bool RGFW_loadGL(void) { return RGFW_FALSE; }
 #endif
 
@@ -16532,4 +16538,3 @@ void RGFW_load_Wayland(void) {
 #if _MSC_VER
 	#pragma warning( pop )
 #endif
-

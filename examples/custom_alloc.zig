@@ -1,8 +1,13 @@
 const std = @import("std");
+const rgfw = @import("rgfw");
 const software = @import("support/software.zig");
 
 pub fn main() !void {
-    // Zig owns the framebuffer allocation, making its lifetime explicit.
+    var hooks = rgfw.AllocatorHooks.init(std.heap.smp_allocator);
+    hooks.install();
+    defer rgfw.AllocatorHooks.uninstall();
+
+    // Both RGFW resources and the framebuffer now use Zig allocators.
     try software.run("Zig allocator ownership", draw);
 }
 

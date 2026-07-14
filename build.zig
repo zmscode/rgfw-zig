@@ -8,13 +8,38 @@ pub fn build(b: *std.Build) void {
     const window_system = b.option(
         WindowSystem,
         "window-system",
-        "Native window system (cocoa, win32, x11, wayland)",
+        "Native window system (cocoa, win32, x11, wayland, custom)",
     ) orelse WindowSystem.default(target.result.os.tag);
-    window_system.validate(target.result.os.tag);
+    const custom_backend_header = b.option(
+        []const u8,
+        "custom-backend-header",
+        "Absolute path to an RGFW custom-backend header",
+    );
+    const custom_backend_link_platform_libraries = b.option(
+        bool,
+        "custom-backend-link-platform-libraries",
+        "Link the target's default platform libraries for an adapter backend",
+    ) orelse false;
+    window_system.validate(target.result.os.tag, custom_backend_header != null);
     const opengl = b.option(bool, "opengl", "Enable RGFW's OpenGL helpers") orelse false;
     const egl = b.option(bool, "egl", "Enable RGFW's EGL helpers") orelse false;
     const egl_enabled = egl or (window_system == .wayland and opengl);
     const vulkan = b.option(bool, "vulkan", "Enable RGFW's Vulkan helpers") orelse false;
+    const directx = b.option(bool, "directx", "Enable RGFW's DirectX helper") orelse false;
+    if (directx and target.result.os.tag != .windows) {
+        @panic("RGFW DirectX support requires a Windows target");
+    }
+    const webgpu = b.option(bool, "webgpu", "Enable RGFW's WebGPU surface helper") orelse false;
+    const webgpu_library = b.option(
+        []const u8,
+        "webgpu-library",
+        "System WebGPU library to link when WebGPU support is enabled",
+    );
+    const custom_allocator = b.option(
+        bool,
+        "custom-allocator",
+        "Route RGFW allocations through rgfw.AllocatorHooks",
+    ) orelse false;
     const rgfw_debug = b.option(bool, "rgfw-debug", "Enable RGFW debug messages") orelse false;
     const vk_zig_example = b.option(
         bool,
@@ -25,11 +50,19 @@ pub fn build(b: *std.Build) void {
     const vulkan_include = if (vulkan_headers) |dependency| dependency.path("include") else null;
     const egl_headers = if (egl_enabled) b.lazyDependency("egl_headers", .{}) else null;
     const egl_include = if (egl_headers) |dependency| dependency.path("api") else null;
+    const webgpu_headers = if (webgpu) b.lazyDependency("webgpu_headers", .{}) else null;
+    const webgpu_include = if (webgpu_headers) |dependency| dependency.path("") else null;
 
     const features: Features = .{
         .opengl = opengl,
         .egl = egl_enabled,
         .vulkan = vulkan,
+        .directx = directx,
+        .webgpu = webgpu,
+        .webgpu_library = webgpu_library,
+        .custom_allocator = custom_allocator,
+        .custom_backend_header = custom_backend_header,
+        .custom_backend_link_platform_libraries = custom_backend_link_platform_libraries,
         .rgfw_debug = rgfw_debug,
         .window_system = window_system,
     };
@@ -44,6 +77,7 @@ pub fn build(b: *std.Build) void {
         b.path("vendor"),
         vulkan_include,
         egl_include,
+        webgpu_include,
         features,
     );
     const clean_bindings = cleanBindings(b, cleaner, translate_c.getOutput(), "rgfw_raw.zig");
@@ -54,12 +88,24 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
-    configureModule(b, rgfw_raw, target, vulkan_include, egl_include, wayland, features);
+    configureModule(
+        b,
+        rgfw_raw,
+        target,
+        vulkan_include,
+        egl_include,
+        webgpu_include,
+        wayland,
+        features,
+    );
 
     const build_options = b.addOptions();
     build_options.addOption(bool, "opengl", features.opengl);
     build_options.addOption(bool, "egl", features.egl);
     build_options.addOption(bool, "vulkan", features.vulkan);
+    build_options.addOption(bool, "directx", features.directx);
+    build_options.addOption(bool, "webgpu", features.webgpu);
+    build_options.addOption(bool, "custom_allocator", features.custom_allocator);
     build_options.addOption(bool, "rgfw_debug", features.rgfw_debug);
     build_options.addOption(WindowSystem, "window_system", features.window_system);
 
@@ -76,13 +122,28 @@ pub fn build(b: *std.Build) void {
     addBindingsStep(b, clean_bindings);
     addTestStep(b, target, optimize, rgfw, features);
     addExampleSteps(b, target, optimize, rgfw, features, vk_zig_example);
-    addUpdateStep(b, cleaner, target, optimize, vulkan_include, egl_include, features);
+    addUpdateStep(
+        b,
+        cleaner,
+        target,
+        optimize,
+        vulkan_include,
+        egl_include,
+        webgpu_include,
+        features,
+    );
 }
 
 const Features = struct {
     opengl: bool,
     egl: bool,
     vulkan: bool,
+    directx: bool,
+    webgpu: bool,
+    webgpu_library: ?[]const u8,
+    custom_allocator: bool,
+    custom_backend_header: ?[]const u8,
+    custom_backend_link_platform_libraries: bool,
     rgfw_debug: bool,
     window_system: WindowSystem,
 };
@@ -92,6 +153,7 @@ const WindowSystem = enum {
     win32,
     x11,
     wayland,
+    custom,
 
     fn default(os_tag: std.Target.Os.Tag) WindowSystem {
         return switch (os_tag) {
@@ -102,7 +164,17 @@ const WindowSystem = enum {
         };
     }
 
-    fn validate(window_system: WindowSystem, os_tag: std.Target.Os.Tag) void {
+    fn validate(
+        window_system: WindowSystem,
+        os_tag: std.Target.Os.Tag,
+        has_custom_backend_header: bool,
+    ) void {
+        if (window_system == .custom and !has_custom_backend_header) {
+            @panic("the custom window system requires -Dcustom-backend-header=/absolute/path");
+        }
+        if (window_system != .custom and has_custom_backend_header) {
+            @panic("-Dcustom-backend-header requires -Dwindow-system=custom");
+        }
         switch (window_system) {
             .cocoa => if (os_tag != .macos) {
                 @panic("the cocoa window system requires a macOS target");
@@ -117,6 +189,7 @@ const WindowSystem = enum {
             .wayland => if (os_tag != .linux) {
                 @panic("the wayland window system currently requires a Linux target");
             },
+            .custom => {},
         }
     }
 };
@@ -134,6 +207,7 @@ fn addTranslateC(
     rgfw_include: std.Build.LazyPath,
     vulkan_include: ?std.Build.LazyPath,
     egl_include: ?std.Build.LazyPath,
+    webgpu_include: ?std.Build.LazyPath,
     features: Features,
 ) *std.Build.Step.TranslateC {
     const translate_c = b.addTranslateC(.{
@@ -145,6 +219,7 @@ fn addTranslateC(
     translate_c.addIncludePath(rgfw_include);
     if (vulkan_include) |include| translate_c.addIncludePath(include);
     if (egl_include) |include| translate_c.addIncludePath(include);
+    if (webgpu_include) |include| translate_c.addIncludePath(include);
     addTranslatePlatformMacros(translate_c, features.window_system);
     addTranslateMacros(translate_c, features);
     return translate_c;
@@ -167,8 +242,8 @@ fn addTranslatePlatformMacros(
         .wayland => {
             translate_c.defineCMacro("RGFW_WAYLAND", null);
             translate_c.defineCMacro("RGFW_NO_X11", null);
-            translate_c.defineCMacro("RGFW_UNIX", null);
         },
+        .custom => {},
     }
 }
 
@@ -176,7 +251,17 @@ fn addTranslateMacros(translate_c: *std.Build.Step.TranslateC, features: Feature
     if (features.opengl) translate_c.defineCMacro("RGFW_OPENGL", null);
     if (features.egl) translate_c.defineCMacro("RGFW_EGL", null);
     if (features.vulkan) translate_c.defineCMacro("RGFW_VULKAN", null);
+    // Windows SDK COM headers currently produce unsupported translate-c
+    // declarations. The idiomatic DirectX wrapper uses the stable pointer ABI
+    // directly, while RGFW's C implementation still receives RGFW_DIRECTX.
+    if (features.webgpu) translate_c.defineCMacro("RGFW_WEBGPU", null);
     if (features.rgfw_debug) translate_c.defineCMacro("RGFW_DEBUG", null);
+    if (features.custom_backend_header) |header| {
+        translate_c.defineCMacro(
+            "RGFW_ZIG_CUSTOM_BACKEND_HEADER",
+            translate_c.step.owner.fmt("\"{s}\"", .{header}),
+        );
+    }
 }
 
 fn addBindingCleaner(b: *std.Build) *std.Build.Step.Compile {
@@ -207,23 +292,45 @@ fn configureModule(
     target: std.Build.ResolvedTarget,
     vulkan_include: ?std.Build.LazyPath,
     egl_include: ?std.Build.LazyPath,
+    webgpu_include: ?std.Build.LazyPath,
     wayland: ?WaylandProtocols,
     features: Features,
 ) void {
     module.addIncludePath(b.path("vendor"));
     if (vulkan_include) |include| module.addIncludePath(include);
     if (egl_include) |include| module.addIncludePath(include);
+    if (webgpu_include) |include| module.addIncludePath(include);
     if (wayland) |generated| module.addIncludePath(generated.directory);
     module.addCSourceFile(.{
         .file = b.path("src/rgfw.c"),
         .flags = &.{"-std=c99"},
     });
+    if (features.custom_allocator) {
+        module.addCSourceFile(.{
+            .file = b.path("src/allocator_shim.c"),
+            .flags = &.{"-std=c99"},
+        });
+        module.addCMacro("RGFW_ZIG_CUSTOM_ALLOCATOR", "1");
+    }
+    if (features.custom_backend_header) |header| {
+        module.addCMacro(
+            "RGFW_ZIG_CUSTOM_BACKEND_HEADER",
+            b.fmt("\"{s}\"", .{header}),
+        );
+    }
     module.addCMacro("RGFW_IMPLEMENTATION", "1");
     module.addCMacro("RGFW_EXPORT", "1");
     addModulePlatformMacros(module, features.window_system);
     if (features.opengl) module.addCMacro("RGFW_OPENGL", "1");
     if (features.egl) module.addCMacro("RGFW_EGL", "1");
     if (features.vulkan) module.addCMacro("RGFW_VULKAN", "1");
+    if (features.directx) module.addCMacro("RGFW_DIRECTX", "1");
+    if (features.webgpu) {
+        module.addCMacro("RGFW_WEBGPU", "1");
+        if (features.webgpu_library) |library| {
+            module.linkSystemLibrary(library, .{});
+        }
+    }
     if (features.rgfw_debug) module.addCMacro("RGFW_DEBUG", "1");
 
     if (wayland) |generated| {
@@ -249,8 +356,8 @@ fn addModulePlatformMacros(module: *std.Build.Module, window_system: WindowSyste
         .wayland => {
             module.addCMacro("RGFW_WAYLAND", "1");
             module.addCMacro("RGFW_NO_X11", "1");
-            module.addCMacro("RGFW_UNIX", "1");
         },
+        .custom => {},
     }
 }
 
@@ -259,6 +366,8 @@ fn linkPlatformLibraries(
     os_tag: std.Target.Os.Tag,
     features: Features,
 ) void {
+    if (features.window_system == .custom and
+        !features.custom_backend_link_platform_libraries) return;
     switch (os_tag) {
         .macos => {
             module.linkFramework("Cocoa", .{});
@@ -284,6 +393,7 @@ fn linkPlatformLibraries(
                     module.linkSystemLibrary("wayland-cursor", .{});
                     module.linkSystemLibrary("xkbcommon", .{});
                 },
+                .custom => return,
                 else => unreachable,
             }
             module.linkSystemLibrary("dl", .{});
@@ -291,7 +401,9 @@ fn linkPlatformLibraries(
             module.linkSystemLibrary("m", .{});
             if (features.opengl) module.linkSystemLibrary("GL", .{});
         },
-        else => @panic("RGFW currently supports macOS, Windows, and X11 targets"),
+        else => if (features.window_system != .custom) {
+            @panic("RGFW currently supports macOS, Windows, Unix, and custom backends");
+        },
     }
 }
 
@@ -418,6 +530,28 @@ fn addTestStep(
             "RGFW Vulkan support is disabled; pass `.vulkan = true` to the dependency",
         );
     }
+    if (!features.directx) {
+        addCompileFailureTest(
+            b,
+            test_step,
+            target,
+            optimize,
+            rgfw,
+            "tests/compile_fail/directx_disabled.zig",
+            "RGFW DirectX support is disabled; build for Windows with -Ddirectx=true",
+        );
+    }
+    if (!features.webgpu) {
+        addCompileFailureTest(
+            b,
+            test_step,
+            target,
+            optimize,
+            rgfw,
+            "tests/compile_fail/webgpu_disabled.zig",
+            "RGFW WebGPU support is disabled; build with -Dwebgpu=true",
+        );
+    }
 }
 
 fn addCompileFailureTest(
@@ -450,7 +584,23 @@ fn addExampleSteps(
     vk_zig_example: bool,
 ) void {
     const examples_step = b.step("examples", "Build every enabled RGFW example");
+    if (features.webgpu) {
+        const webgpu_check = b.addObject(.{
+            .name = "rgfw-webgpu-interop-check",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("examples/webgpu.zig"),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{.{ .name = "rgfw", .module = rgfw }},
+            }),
+        });
+        examples_step.dependOn(&webgpu_check.step);
+    }
     for (examples) |example| {
+        // RGFW's C object references the provider whenever WebGPU is enabled.
+        // Without a provider, the compile-only interop check above is the
+        // complete examples step; linked examples would correctly be unresolved.
+        if (features.webgpu and features.webgpu_library == null) continue;
         if (!example.enabled(target.result.os.tag, features)) continue;
         if (example.requirement == .vk_zig and !vk_zig_example) continue;
 
@@ -463,6 +613,7 @@ fn addExampleSteps(
                     .win32 => "win32",
                     .x11 => "xlib",
                     .wayland => "wayland",
+                    .custom => @panic("the vk-zig example does not define a custom platform"),
                 },
             }) orelse @panic("the vk-zig example requires the lazy vulkan dependency")
         else
@@ -513,6 +664,10 @@ const Example = struct {
         egl,
         vulkan,
         vk_zig,
+        custom_allocator,
+        custom_backend,
+        directx,
+        webgpu,
         macos,
         windows,
     };
@@ -524,8 +679,12 @@ const Example = struct {
             .egl => features.egl,
             .vulkan => features.vulkan,
             .vk_zig => features.vulkan,
-            .macos => os_tag == .macos,
-            .windows => os_tag == .windows,
+            .custom_allocator => features.custom_allocator,
+            .custom_backend => features.custom_backend_header != null,
+            .directx => features.directx,
+            .webgpu => features.webgpu and features.webgpu_library != null,
+            .macos => os_tag == .macos and features.window_system == .cocoa,
+            .windows => os_tag == .windows and features.window_system == .win32,
         };
     }
 };
@@ -546,10 +705,12 @@ const examples = [_]Example{
     .{
         .name = "custom-alloc",
         .path = "examples/custom_alloc.zig",
+        .requirement = .custom_allocator,
     },
     .{
         .name = "custom-backend",
         .path = "examples/custom_backend.zig",
+        .requirement = .custom_backend,
     },
     .{
         .name = "event-queue",
@@ -619,7 +780,12 @@ const examples = [_]Example{
     .{
         .name = "dx11",
         .path = "examples/dx11.zig",
-        .requirement = .windows,
+        .requirement = .directx,
+    },
+    .{
+        .name = "webgpu",
+        .path = "examples/webgpu.zig",
+        .requirement = .webgpu,
     },
     .{
         .name = "first-person-camera",
@@ -690,6 +856,7 @@ fn addUpdateStep(
     optimize: std.builtin.OptimizeMode,
     vulkan_include: ?std.Build.LazyPath,
     egl_include: ?std.Build.LazyPath,
+    webgpu_include: ?std.Build.LazyPath,
     features: Features,
 ) void {
     const upstream_ref = b.option(
@@ -723,6 +890,7 @@ fn addUpdateStep(
         checkout,
         vulkan_include,
         egl_include,
+        webgpu_include,
         features,
     );
     const clean_bindings = cleanBindings(

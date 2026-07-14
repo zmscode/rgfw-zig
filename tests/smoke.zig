@@ -14,6 +14,86 @@ test "window flags can be combined from Zig" {
     const flags: rgfw.WindowFlags = .{ .centered = true, .no_resize = true };
     const raw_flags = flags.toRaw();
     try std.testing.expect(raw_flags != 0);
+    try std.testing.expectEqual(raw_flags, rgfw.WindowFlags.fromRaw(raw_flags).toRaw());
+}
+
+test "image validation rejects invalid dimensions and short storage" {
+    var pixels: [12]u8 = undefined;
+    try std.testing.expectError(
+        error.InvalidDimensions,
+        rgfw.Image.init(&pixels, 0, 1, .rgba8),
+    );
+    try std.testing.expectError(
+        error.BufferTooSmall,
+        rgfw.Image.init(&pixels, 2, 2, .rgba8),
+    );
+    const image = try rgfw.Image.init(&pixels, 2, 2, .rgb8);
+    try std.testing.expectEqual(@as(usize, 12), try image.requiredBytes());
+}
+
+test "cursor and icon enums cover RGFW constants" {
+    try std.testing.expectEqual(
+        @as(rgfw.raw.RGFW_mouseIcon, rgfw.raw.RGFW_mouseResizeNWSE),
+        @intFromEnum(rgfw.Cursor.resize_northwest_southeast),
+    );
+    try std.testing.expectEqual(
+        @as(rgfw.raw.RGFW_icon, rgfw.raw.RGFW_iconBoth),
+        @intFromEnum(rgfw.IconTarget.both),
+    );
+}
+
+test "owning wrappers are safe to deinitialize repeatedly" {
+    var cursor: rgfw.CustomCursor = .{ .handle = null };
+    cursor.deinit();
+    cursor.deinit();
+
+    var surface: rgfw.Surface = .{ .handle = null };
+    surface.deinit();
+    surface.deinit();
+    var closed_window: rgfw.Window = .{ .handle = null };
+    try std.testing.expectError(error.InactiveObject, surface.blit(&closed_window));
+
+    var ramp: rgfw.OwnedGammaRamp = .{ .storage = &.{}, .count = 0 };
+    ramp.deinit(std.testing.allocator);
+    ramp.deinit(std.testing.allocator);
+}
+
+test "event masks and waits round trip without magic integers" {
+    inline for (@typeInfo(rgfw.EventMask).@"struct".fields) |field| {
+        var mask: rgfw.EventMask = .{};
+        @field(mask, field.name) = true;
+        try std.testing.expectEqual(mask.toRaw(), rgfw.EventMask.fromRaw(mask.toRaw()).toRaw());
+    }
+    try std.testing.expectEqual(
+        @as(rgfw.raw.RGFW_eventFlag, rgfw.raw.RGFW_allEventFlags),
+        rgfw.EventMask.all.toRaw(),
+    );
+    try std.testing.expectEqual(
+        @as(rgfw.raw.RGFW_eventWait, 25),
+        (rgfw.EventWait{ .milliseconds = 25 }).toRaw(),
+    );
+}
+
+test "monitor mode request groups map to RGFW flags" {
+    try std.testing.expectEqual(
+        @as(rgfw.raw.RGFW_modeRequest, rgfw.raw.RGFW_monitorAll),
+        rgfw.ModeRequest.all.toRaw(),
+    );
+}
+
+test "custom allocator hooks route RGFW allocation pairs" {
+    if (!rgfw.features.custom_allocator) return;
+
+    var storage: [1024]u8 align(64) = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    var hooks = rgfw.AllocatorHooks.init(fixed.allocator());
+    hooks.install();
+    defer rgfw.AllocatorHooks.uninstall();
+
+    const pointer = rgfw.raw.RGFW_alloc(64) orelse return error.OutOfMemory;
+    try std.testing.expect(fixed.end_index > 0);
+    rgfw.raw.RGFW_free(pointer);
+    try std.testing.expectEqual(@as(usize, 0), fixed.end_index);
 }
 
 test "idiomatic window event helpers are available" {
@@ -57,6 +137,7 @@ test "typed callback installation checks context lifetime" {
 }
 
 test "window system selection is exposed to applications" {
+    if (rgfw.window_system == .custom) return;
     const expected: rgfw.WindowSystem = switch (builtin.os.tag) {
         .macos => .cocoa,
         .windows => .win32,
@@ -289,6 +370,21 @@ test "Vulkan declarations and helpers follow the feature option" {
         try std.testing.expect(!std.mem.eql(u8, extension, "VK_MVK_macos_surface"));
     }
     if (builtin.os.tag == .macos) try std.testing.expect(found_metal_surface);
+}
+
+test "DirectX and WebGPU declarations follow feature options" {
+    if (rgfw.features.directx) {
+        try std.testing.expect(@hasDecl(rgfw.DirectX, "createSwapChain"));
+    } else {
+        try std.testing.expect(!@hasDecl(rgfw.raw, "RGFW_window_createSwapChain_DirectX"));
+    }
+
+    if (rgfw.features.webgpu) {
+        try std.testing.expect(@hasDecl(rgfw.WebGPU, "createSurface"));
+        try std.testing.expect(@hasDecl(rgfw.WebGPU, "createSurfaceAs"));
+    } else {
+        try std.testing.expect(!@hasDecl(rgfw.raw, "WGPUInstance"));
+    }
 }
 
 test "Vulkan surface interop accepts handles from an independent module" {

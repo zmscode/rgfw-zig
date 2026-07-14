@@ -21,14 +21,20 @@ pub fn run(title: [:0]const u8, draw: *const fn ([]u8, u32) void) !void {
     const pixels = try gpa.alloc(u8, pixel_count * bytes_per_pixel);
     defer gpa.free(pixels);
 
-    var surface = try rgfw.Surface.init(pixels, width, height, .rgba8);
+    var surface = try rgfw.Surface.initForWindow(
+        &window,
+        pixels,
+        width,
+        height,
+        .rgba8,
+    );
     defer surface.deinit();
 
     var frame_index: u32 = 0;
     while (window.isOpen()) : (frame_index +%= 1) {
         window.pumpEvents();
         draw(pixels, frame_index);
-        surface.blit(&window);
+        try surface.blit(&window);
     }
 }
 

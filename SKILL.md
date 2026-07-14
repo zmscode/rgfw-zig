@@ -1,6 +1,6 @@
 ---
 name: rgfw-zig
-description: Integrate, configure, regenerate, test, and debug the rgfw-zig Zig 0.16 bindings for RGFW. Use when an agent needs to add RGFW windows or input to a Zig project, enable OpenGL, EGL, or Vulkan, consume raw RGFW declarations, regenerate bindings from upstream, port RGFW examples, or diagnose rgfw-zig build and event-loop behavior.
+description: Integrate, configure, regenerate, test, and debug the rgfw-zig Zig 0.16 bindings for RGFW. Use when an agent needs RGFW windows, input, monitors, software surfaces, OpenGL, EGL, Vulkan, DirectX, or WebGPU; needs advanced allocator/backend configuration; or must regenerate bindings from upstream.
 ---
 
 # RGFW Zig
@@ -29,6 +29,9 @@ exe.root_module.addImport("rgfw", dependency.module("rgfw"));
 
 Enable only required backends with `.opengl = true`, `.egl = true`, or `.vulkan = true`. Enable
 RGFW diagnostics with `.@"rgfw-debug" = true`.
+
+DirectX uses `.directx = true` on Windows. WebGPU uses `.webgpu = true` and requires the
+application to link a provider; name a system provider with `.@"webgpu-library"` when appropriate.
 
 The dependency selects Cocoa on macOS, Win32 on Windows, and X11 on Unix. Select native Wayland
 on Linux with `.@"window-system" = .wayland`. Wayland requires `wayland-scanner`,
@@ -89,6 +92,16 @@ event kind outside its documented match. Use `rawEvent()` only for data not repr
 Use `window.setCursorMode(.captured)` and `.normal` for first-person pointer ownership rather than
 coordinating raw mode, capture, and visibility separately.
 
+Use `CustomCursor.init`/`deinit` and `Window.setCursor` for pixel cursors, `Window.setIcon` for
+typed icons, and `Surface.initForWindow` for software rendering. The window-scoped surface path is
+required for safe X11 visual selection. Construct pixel data with `Image.init` so dimensions,
+format, overflow, and buffer length are checked once.
+
+Use `Clipboard.readAlloc` for owned clipboard bytes and `Clipboard.read` only for a short-lived
+borrow invalidated by the next read or context shutdown. Enumerate displays with
+`Context.monitors`, free that Zig-allocated slice, and use `Monitor.supportedModes` or
+`Monitor.gammaRamp` for allocator-owned copies.
+
 Use `window.rawHandle()` and `surface.rawHandle()` for checked RGFW handles. Use
 `window.nativeHandle()` for a tagged Cocoa, Win32, X11, or Wayland value. Do not read the public
 optional handle fields or call platform-specific raw getters just to determine whether an object is
@@ -107,10 +120,10 @@ typed handler to receive an initialization failure.
 
 ## Select a graphics backend
 
-- OpenGL: enable `.opengl = true`, initialize with `.backend = .opengl`, and create the window with
-  `.flags.open_gl = true`.
-- EGL: enable `.egl = true`, initialize with `.backend = .egl`, and create the window with
-  `.flags.egl = true`.
+- OpenGL: enable `.opengl = true`, initialize with `.backend = .opengl`, then use
+  `OpenGL.createContext` with explicit `GraphicsHints` when version/profile matters.
+- EGL: enable `.egl = true`, initialize with `.backend = .egl`, then use `EGL.createContext` with
+  `.profile = .embedded` for OpenGL ES.
 - Vulkan: enable `.vulkan = true` and initialize with `.backend = .vulkan`. Iterate with
   `var extensions = rgfw.Vulkan.requiredInstanceExtensions()` or append the original borrowed
   pointers directly with `appendRequiredInstanceExtensions`. Enable each before creating the
@@ -119,18 +132,22 @@ typed handler to receive an initialization failure.
 For independently translated Vulkan handles such as `vk-zig`, centralize ABI reinterpretation:
 
 ```zig
-var surface = try rgfw.Vulkan.createOwnedSurfaceAs(
-    vk.raw.VkSurfaceKHR,
-    &window,
-    &instance,
-);
+var surface = try rgfw.Vulkan.createOwnedSurface(&window, &instance);
 defer surface.deinit();
 ```
 
 Do not add local Vulkan `@ptrCast` bridges. `createSurfaceAs` validates handle representation and
-size when raw ownership stays with the caller. Prefer `createOwnedSurfaceAs` with vk-zig so its
+size when raw ownership stays with the caller. Prefer `createOwnedSurface` with vk-zig so its
 `Instance.adoptSurface` owns and destroys the surface. Populate `vk.ExtensionSet` with
 `appendRequiredInstanceExtensions`; do not hand-copy the pointer array.
+
+For DirectX and WebGPU packages with independently declared handles, use
+`DirectX.createSwapChain` and `WebGPU.createSurfaceAs`; do not add application-level casts.
+
+For allocator hooks, enable `.@"custom-allocator" = true`, retain a stable `AllocatorHooks` value
+from before `rgfw.init` until after every resource is deinitialized, then call `uninstall`. Custom
+backends use `.@"window-system" = .custom` plus an absolute `.@"custom-backend-header"` path; that
+same header drives translation and C compilation.
 
 ## Regenerate and validate
 
@@ -150,8 +167,11 @@ zig fmt --check build.zig src tests tools examples
 zig build test
 zig build test -Doptimize=ReleaseFast
 zig build test -Dvulkan=true
+zig build test -Dcustom-allocator=true
 zig build examples -Dopengl=true -Degl=true -Dvulkan=true
 zig build examples -Dvulkan=true -Dvk-zig-example=true
+zig build bindings -Dtarget=x86_64-windows-gnu -Ddirectx=true
+zig build examples -Dwebgpu=true
 ```
 
 Keep compile-failure cases under `tests/compile_fail` and register them with `expect_errors` in

@@ -9,16 +9,14 @@ pub fn main() !void {
     defer window.deinit();
 
     var pixels = checkerboard();
-    const mouse = rgfw.raw.RGFW_createMouse(
+    var cursor = try rgfw.CustomCursor.init(
         &pixels,
         @intCast(icon_size),
         @intCast(icon_size),
-        @intFromEnum(rgfw.ImageFormat.rgba8),
-    ) orelse return error.MouseCreationFailed;
-    defer rgfw.raw.RGFW_freeMouse(mouse);
-    if (rgfw.raw.RGFW_window_setMouse(window.handle, mouse) == 0) {
-        return error.MouseAssignmentFailed;
-    }
+        .rgba8,
+    );
+    defer cursor.deinit();
+    try window.setCursor(&cursor);
 
     while (window.isOpen()) {
         window.pumpEvents();

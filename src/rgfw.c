@@ -1,3 +1,12 @@
+#if defined(RGFW_ZIG_CUSTOM_ALLOCATOR)
+#include <stddef.h>
+
+void* rgfw_zig_alloc(size_t size);
+void rgfw_zig_free(void* pointer);
+#define RGFW_ALLOC rgfw_zig_alloc
+#define RGFW_FREE rgfw_zig_free
+#endif
+
 #if defined(__APPLE__) && defined(RGFW_VULKAN)
 #include <dlfcn.h>
 #include <string.h>
@@ -30,7 +39,11 @@ VKAPI_ATTR VkResult VKAPI_CALL rgfw_zig_vkCreateMetalSurfaceEXT(
 #define pView pLayer
 #endif
 
+#ifdef RGFW_ZIG_CUSTOM_BACKEND_HEADER
+#include RGFW_ZIG_CUSTOM_BACKEND_HEADER
+#else
 #include "RGFW.h"
+#endif
 
 #if defined(__APPLE__) && defined(RGFW_VULKAN)
 #undef dlopen

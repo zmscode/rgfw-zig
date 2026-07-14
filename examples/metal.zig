@@ -15,8 +15,7 @@ var printed = false;
 
 fn showView(window: *rgfw.Window) void {
     if (printed) return;
-    const handle = window.handle orelse return;
-    const view = rgfw.raw.RGFW_window_getView_OSX(handle);
-    std.debug.print("Attach CAMetalLayer to NSView {?}.\n", .{view});
+    const native = window.nativeHandleAs(.cocoa) catch return;
+    std.debug.print("Attach CAMetalLayer to NSView {*}.\n", .{native.view});
     printed = true;
 }

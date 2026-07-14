@@ -8,6 +8,9 @@ pub const features: Features = .{
     .opengl = build_options.opengl,
     .egl = build_options.egl,
     .vulkan = build_options.vulkan,
+    .directx = build_options.directx,
+    .webgpu = build_options.webgpu,
+    .custom_allocator = build_options.custom_allocator,
     .debug = build_options.rgfw_debug,
     .window_system = build_options.window_system,
 };
@@ -19,8 +22,68 @@ pub const Features = struct {
     opengl: bool,
     egl: bool,
     vulkan: bool,
+    directx: bool,
+    webgpu: bool,
+    custom_allocator: bool,
     debug: bool,
     window_system: WindowSystem,
+};
+
+pub const AllocatorHooks = if (features.custom_allocator) struct {
+    allocator: std.mem.Allocator,
+
+    extern fn rgfw_zig_set_allocator(
+        context: ?*anyopaque,
+        allocate: ?*const fn (?*anyopaque, usize, usize) callconv(.c) ?*anyopaque,
+        free: ?*const fn (?*anyopaque, ?*anyopaque, usize, usize) callconv(.c) void,
+    ) callconv(.c) void;
+
+    pub fn init(allocator: std.mem.Allocator) @This() {
+        return .{ .allocator = allocator };
+    }
+
+    /// Installs this bridge globally. It must outlive every RGFW Context and resource.
+    pub fn install(hooks: *@This()) void {
+        rgfw_zig_set_allocator(hooks, allocate, free);
+    }
+
+    /// Restores the C allocator. Call only after all RGFW resources have been deinitialized.
+    pub fn uninstall() void {
+        rgfw_zig_set_allocator(null, null, null);
+    }
+
+    fn allocate(
+        erased: ?*anyopaque,
+        size: usize,
+        alignment: usize,
+    ) callconv(.c) ?*anyopaque {
+        const hooks: *@This() = @ptrCast(@alignCast(erased.?));
+        const memory = hooks.allocator.rawAlloc(
+            size,
+            .fromByteUnits(alignment),
+            @returnAddress(),
+        ) orelse return null;
+        return @ptrCast(memory);
+    }
+
+    fn free(
+        erased: ?*anyopaque,
+        pointer: ?*anyopaque,
+        size: usize,
+        alignment: usize,
+    ) callconv(.c) void {
+        const hooks: *@This() = @ptrCast(@alignCast(erased.?));
+        const bytes: [*]u8 = @ptrCast(pointer orelse return);
+        hooks.allocator.rawFree(
+            bytes[0..size],
+            .fromByteUnits(alignment),
+            @returnAddress(),
+        );
+    }
+} else struct {
+    pub fn requireEnabled() void {
+        @compileError("RGFW allocator hooks are disabled; build with -Dcustom-allocator=true");
+    }
 };
 
 pub const Backend = enum {
@@ -141,6 +204,8 @@ fn diagnosticCallback(info: [*c]const raw.RGFW_debugInfo) callconv(.c) void {
     });
 }
 
+/// The single owning RGFW process context. Do not copy a live value.
+/// deinit is idempotent and invalidates every borrowed window, monitor, and native handle.
 pub const Context = struct {
     active: bool = true,
     warning: ?InitializationWarning = null,
@@ -180,6 +245,100 @@ pub const Context = struct {
     pub fn waitForNextEvent(context: *const Context) void {
         std.debug.assert(context.active);
         raw.RGFW_waitForEvent(@intCast(raw.RGFW_eventWaitNext));
+    }
+
+    pub fn waitForEvent(context: *const Context, timeout: EventWait) void {
+        std.debug.assert(context.active);
+        raw.RGFW_waitForEvent(timeout.toRaw());
+    }
+
+    pub fn setEventQueueEnabled(context: *const Context, enabled: bool) void {
+        std.debug.assert(context.active);
+        raw.RGFW_setQueueEvents(@intFromBool(enabled));
+    }
+
+    pub fn setDragAndDropCollectionEnabled(context: *const Context, enabled: bool) void {
+        std.debug.assert(context.active);
+        raw.RGFW_setBuildDND(@intFromBool(enabled));
+    }
+
+    pub fn setGlobalRawMouseMode(context: *const Context, enabled: bool) void {
+        std.debug.assert(context.active);
+        raw.RGFW_setRawMouseMode(@intFromBool(enabled));
+    }
+
+    pub fn stopEventCheck(context: *const Context) void {
+        std.debug.assert(context.active);
+        raw.RGFW_stopCheckEvents();
+    }
+
+    pub fn flushEvents(context: *const Context) void {
+        std.debug.assert(context.active);
+        raw.RGFW_eventQueueFlush();
+    }
+
+    pub fn nextQueuedEvent(context: *const Context) ?Event {
+        std.debug.assert(context.active);
+        const event = raw.RGFW_eventQueuePop() orelse return null;
+        return .{ .raw_value = event.* };
+    }
+
+    /// Returns an allocator-owned slice of monitor handles borrowed from Context.
+    /// Free the slice with gpa. refreshMonitors and Context.deinit invalidate its handles.
+    pub fn monitors(
+        context: *const Context,
+        gpa: std.mem.Allocator,
+    ) (Monitor.Error || std.mem.Allocator.Error)![]Monitor {
+        std.debug.assert(context.active);
+        var count: usize = 0;
+        if (raw.RGFW_getMonitorsPtr(0, null, &count) == 0) {
+            return error.QueryFailed;
+        }
+        if (count == 0) return gpa.alloc(Monitor, 0);
+
+        const handles = try gpa.alloc([*c]raw.RGFW_monitor, count);
+        defer gpa.free(handles);
+        var written: usize = 0;
+        if (raw.RGFW_getMonitorsPtr(count, handles.ptr, &written) == 0) {
+            return error.QueryFailed;
+        }
+        if (written > count) return error.QueryFailed;
+
+        const result = try gpa.alloc(Monitor, written);
+        errdefer gpa.free(result);
+        for (handles[0..written], result) |handle, *monitor_value| {
+            if (handle == null) return error.QueryFailed;
+            monitor_value.* = .{ .handle = @ptrCast(handle) };
+        }
+        return result;
+    }
+
+    /// Returns a monitor borrowed until monitor refresh or Context.deinit.
+    pub fn primaryMonitor(context: *const Context) ?Monitor {
+        std.debug.assert(context.active);
+        const handle = raw.RGFW_getPrimaryMonitor();
+        if (handle == null) return null;
+        return .{ .handle = @ptrCast(handle) };
+    }
+
+    pub fn refreshMonitors(context: *const Context) void {
+        std.debug.assert(context.active);
+        raw.RGFW_pollMonitors();
+    }
+
+    /// Returns a display-level native handle borrowed until Context.deinit.
+    pub fn nativeDisplayHandle(context: *const Context) HandleError!NativeDisplayHandle {
+        if (!context.active) return error.InactiveObject;
+        return switch (window_system) {
+            .cocoa => .{ .cocoa = raw.RGFW_getLayer_OSX() orelse
+                return error.NativeHandleUnavailable },
+            .win32 => .{ .win32 = {} },
+            .x11 => .{ .x11 = raw.RGFW_getDisplay_X11() orelse
+                return error.NativeHandleUnavailable },
+            .wayland => .{ .wayland = @ptrCast(raw.RGFW_getDisplay_Wayland() orelse
+                return error.NativeHandleUnavailable) },
+            .custom => .{ .custom = {} },
+        };
     }
 
     pub fn on(
@@ -257,6 +416,32 @@ pub fn waitForNextEvent() void {
     raw.RGFW_waitForEvent(@intCast(raw.RGFW_eventWaitNext));
 }
 
+pub const Platform = struct {
+    /// Changes the process working directory to the macOS application resource directory.
+    pub fn moveToApplicationResources() void {
+        if (comptime window_system != .cocoa) {
+            @compileError(
+                "Platform.moveToApplicationResources is only available with Cocoa",
+            );
+        }
+        raw.RGFW_moveToMacOSResourceDir();
+    }
+};
+
+pub const EventWait = union(enum) {
+    poll,
+    forever,
+    milliseconds: u31,
+
+    pub fn toRaw(wait: EventWait) raw.RGFW_eventWait {
+        return switch (wait) {
+            .poll => @intCast(raw.RGFW_eventNoWait),
+            .forever => @intCast(raw.RGFW_eventWaitNext),
+            .milliseconds => |milliseconds| @intCast(milliseconds),
+        };
+    }
+};
+
 pub const Input = struct {
     pub fn keyPressed(key: Key) bool {
         return raw.RGFW_isKeyPressed(@intFromEnum(key)) != 0;
@@ -295,23 +480,124 @@ pub const Input = struct {
         raw.RGFW_getMouseScroll(&x, &y);
         return .{ .x = x, .y = y };
     }
+
+    /// Returns the cursor position in global desktop coordinates.
+    pub fn globalMousePosition() ?Point {
+        var x: i32 = 0;
+        var y: i32 = 0;
+        if (raw.RGFW_getGlobalMouse(&x, &y) == 0) return null;
+        return .{ .x = x, .y = y };
+    }
+
+    /// Converts a platform key code to RGFW's physical key representation.
+    pub fn keyFromAPI(key_code: u32) Key {
+        return @enumFromInt(raw.RGFW_apiKeyToRGFW(key_code));
+    }
+
+    /// Converts an RGFW key to the active platform's physical key code.
+    pub fn keyToAPI(key: Key) u32 {
+        return raw.RGFW_rgfwToApiKey(@intFromEnum(key));
+    }
+
+    /// Applies the active keyboard layout to a physical RGFW key.
+    pub fn mappedKey(key: Key) Key {
+        return @enumFromInt(raw.RGFW_physicalToMappedKey(@intFromEnum(key)));
+    }
 };
 
 pub const Clipboard = struct {
+    pub const Error = error{
+        ReadFailed,
+        WriteFailed,
+        BufferTooSmall,
+    };
+
+    pub const Transfer = struct {
+        kind: DataTransferKind,
+        bytes: []const u8,
+    };
+
+    pub const OwnedTransfer = struct {
+        kind: DataTransferKind,
+        bytes: []u8,
+
+        pub fn deinit(transfer: *OwnedTransfer, gpa: std.mem.Allocator) void {
+            if (transfer.bytes.len == 0) return;
+            gpa.free(transfer.bytes);
+            transfer.bytes = &.{};
+        }
+    };
+
+    /// Returns RGFW-owned text invalidated by the next clipboard read/write or Context.deinit.
+    pub fn readTextBorrowed() ?[]const u8 {
+        const transfer = read(.text) orelse return null;
+        return transfer.bytes;
+    }
+
+    /// Compatibility alias for readTextBorrowed. Prefer readTextAlloc for retained text.
     pub fn readText() ?[]const u8 {
-        const transfer = raw.RGFW_readClipboardString();
-        if (transfer == null) return null;
-        if (transfer.*.data == null) return null;
-        return transfer.*.data[0..transfer.*.length];
+        return readTextBorrowed();
+    }
+
+    /// Returns RGFW-owned data invalidated by the next clipboard read/write or Context.deinit.
+    pub fn read(kind: DataTransferKind) ?Transfer {
+        const transfer = raw.RGFW_readClipboard(@intFromEnum(kind)) orelse return null;
+        const bytes = transfer.*.data orelse return null;
+        return .{
+            .kind = @enumFromInt(transfer.*.type),
+            .bytes = bytes[0..transfer.*.length],
+        };
+    }
+
+    pub fn readInto(buffer: []u8, kind: DataTransferKind) Error!Transfer {
+        var transfer = std.mem.zeroes(raw.RGFW_dataTransfer);
+        const success = raw.RGFW_readClipboardPtr(
+            @intFromEnum(kind),
+            buffer.ptr,
+            buffer.len,
+            &transfer,
+        );
+        if (success == 0) {
+            if (transfer.length > buffer.len) return error.BufferTooSmall;
+            return error.ReadFailed;
+        }
+        if (transfer.length > buffer.len) return error.BufferTooSmall;
+        return .{
+            .kind = @enumFromInt(transfer.type),
+            .bytes = buffer[0..transfer.length],
+        };
+    }
+
+    pub fn readAlloc(
+        gpa: std.mem.Allocator,
+        kind: DataTransferKind,
+    ) (Error || std.mem.Allocator.Error)!OwnedTransfer {
+        const borrowed = read(kind) orelse return error.ReadFailed;
+        return .{
+            .kind = borrowed.kind,
+            .bytes = try gpa.dupe(u8, borrowed.bytes),
+        };
+    }
+
+    pub fn readTextAlloc(
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]u8 {
+        const transfer = try readAlloc(gpa, .text);
+        return transfer.bytes;
+    }
+
+    pub fn write(kind: DataTransferKind, bytes: []const u8) Error!void {
+        const transfer: raw.RGFW_dataTransfer = .{
+            .data = bytes.ptr,
+            .length = bytes.len,
+            .type = @intFromEnum(kind),
+        };
+        if (raw.RGFW_writeClipboard(&transfer) == 0) return error.WriteFailed;
     }
 
     pub fn writeText(text: []const u8) bool {
-        const transfer: raw.RGFW_dataTransfer = .{
-            .data = text.ptr,
-            .length = text.len,
-            .type = @intCast(raw.RGFW_dataText),
-        };
-        return raw.RGFW_writeClipboard(&transfer) != 0;
+        write(.text, text) catch return false;
+        return true;
     }
 };
 
@@ -335,6 +621,15 @@ pub const NativeWindowHandle = union(WindowSystem) {
     win32: Win32WindowHandle,
     x11: u64,
     wayland: *anyopaque,
+    custom: *anyopaque,
+};
+
+pub const NativeDisplayHandle = union(WindowSystem) {
+    cocoa: *anyopaque,
+    win32: void,
+    x11: *anyopaque,
+    wayland: *anyopaque,
+    custom: void,
 };
 
 pub fn NativeWindowHandleType(comptime kind: WindowSystem) type {
@@ -343,16 +638,24 @@ pub fn NativeWindowHandleType(comptime kind: WindowSystem) type {
         .win32 => Win32WindowHandle,
         .x11 => u64,
         .wayland => *anyopaque,
+        .custom => *anyopaque,
     };
 }
 
+/// An owning RGFW window. Do not copy a live value; deinit is idempotent.
+/// Lifecycle predicates intentionally treat an inactive value as closed. Legacy input/state
+/// predicates return their neutral value after deinit, while checked operations return
+/// error.InactiveObject. Use rawHandle first when inactive state must be distinguished.
 pub const Window = struct {
     handle: ?*raw.RGFW_window,
 
-    pub const Error = error{
+    pub const Error = ImageError || error{
         InvalidSize,
         CreationFailed,
         InactiveObject,
+        OperationFailed,
+        IconAssignmentFailed,
+        CursorAssignmentFailed,
     };
 
     pub const Options = struct {
@@ -397,6 +700,7 @@ pub const Window = struct {
         return window.handle orelse error.InactiveObject;
     }
 
+    /// Returns a native handle borrowed until this Window is deinitialized.
     pub fn nativeHandle(window: *const Window) HandleError!NativeWindowHandle {
         return switch (window_system) {
             inline else => |kind| @unionInit(
@@ -436,7 +740,17 @@ pub const Window = struct {
             },
             .wayland => raw.RGFW_window_getWindow_Wayland(handle) orelse
                 return error.NativeHandleUnavailable,
+            .custom => @ptrCast(raw.RGFW_window_getSrc(handle) orelse
+                return error.NativeHandleUnavailable),
         };
+    }
+
+    pub fn setNativeLayer(window: *Window, layer: *anyopaque) HandleError!void {
+        if (comptime window_system != .cocoa) {
+            @compileError("Window.setNativeLayer is only available with the Cocoa window system");
+        }
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setLayer_OSX(handle, layer);
     }
 
     pub fn shouldClose(window: *const Window) bool {
@@ -452,6 +766,30 @@ pub const Window = struct {
         const handle = window.handle orelse return;
         if (raw.RGFW_window_shouldClose(handle) != 0) return;
         raw.RGFW_window_setShouldClose(handle, 1);
+    }
+
+    pub fn exitKey(window: *const Window) HandleError!?Key {
+        const handle = try window.rawHandle();
+        const key: Key = @enumFromInt(raw.RGFW_window_getExitKey(handle));
+        return if (key == .none) null else key;
+    }
+
+    pub fn setExitKey(window: *Window, key: ?Key) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setExitKey(handle, if (key) |value|
+            @intFromEnum(value)
+        else
+            @intFromEnum(Key.none));
+    }
+
+    pub fn flags(window: *const Window) HandleError!WindowFlags {
+        const handle = try window.rawHandle();
+        return WindowFlags.fromRaw(raw.RGFW_window_getFlags(handle));
+    }
+
+    pub fn setFlags(window: *Window, value: WindowFlags) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setFlags(handle, value.toRaw());
     }
 
     pub fn size(window: *const Window) Size {
@@ -474,6 +812,15 @@ pub const Window = struct {
         return .{ .width = width, .height = height };
     }
 
+    /// Queries the platform directly when RGFW's cached window size is insufficient.
+    pub fn fetchSize(window: *const Window) HandleError!?Size {
+        const handle = try window.rawHandle();
+        var width: i32 = 0;
+        var height: i32 = 0;
+        if (raw.RGFW_window_fetchSize(handle, &width, &height) == 0) return null;
+        return .{ .width = width, .height = height };
+    }
+
     /// Requests a client-area resize. RGFW reports the resulting size through
     /// its queued event and callback paths after the platform applies it.
     pub fn resize(window: *Window, width: i32, height: i32) Error!void {
@@ -491,11 +838,82 @@ pub const Window = struct {
         return .{ .x = x, .y = y };
     }
 
+    pub fn move(window: *Window, point: Point) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_move(handle, point.x, point.y);
+    }
+
+    pub fn moveToMonitor(window: *Window, monitor_value: Monitor) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_moveToMonitor(handle, monitor_value.handle);
+    }
+
+    pub fn setAspectRatio(window: *Window, ratio: Size) Error!void {
+        try validateSize(ratio.width, ratio.height);
+        const handle = window.handle orelse return error.InactiveObject;
+        raw.RGFW_window_setAspectRatio(handle, ratio.width, ratio.height);
+    }
+
+    pub fn setMinSize(window: *Window, size_value: Size) Error!void {
+        try validateSize(size_value.width, size_value.height);
+        const handle = window.handle orelse return error.InactiveObject;
+        raw.RGFW_window_setMinSize(handle, size_value.width, size_value.height);
+    }
+
+    pub fn setMaxSize(window: *Window, size_value: Size) Error!void {
+        try validateSize(size_value.width, size_value.height);
+        const handle = window.handle orelse return error.InactiveObject;
+        raw.RGFW_window_setMaxSize(handle, size_value.width, size_value.height);
+    }
+
+    pub fn focus(window: *Window) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_focus(handle);
+    }
+
+    pub fn raise(window: *Window) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_raise(handle);
+    }
+
+    pub fn setOpacity(window: *Window, opacity: u8) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setOpacity(handle, opacity);
+    }
+
+    pub fn setMousePassthrough(window: *Window, enabled: bool) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setMousePassthrough(handle, @intFromBool(enabled));
+    }
+
     pub fn mousePosition(window: *const Window) Point {
         const handle = window.handle orelse return .{ .x = 0, .y = 0 };
         var x: i32 = 0;
         var y: i32 = 0;
         _ = raw.RGFW_window_getMouse(handle, &x, &y);
+        return .{ .x = x, .y = y };
+    }
+
+    pub fn moveMouse(window: *Window, point: Point) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_moveMouse(handle, point.x, point.y);
+    }
+
+    pub fn mouseInside(window: *const Window) bool {
+        const handle = window.handle orelse return false;
+        return raw.RGFW_window_isMouseInside(handle) != 0;
+    }
+
+    pub fn dataDragging(window: *const Window) bool {
+        const handle = window.handle orelse return false;
+        return raw.RGFW_window_isDataDragging(handle) != 0;
+    }
+
+    pub fn dataDragPosition(window: *const Window) ?Point {
+        const handle = window.handle orelse return null;
+        var x: i32 = 0;
+        var y: i32 = 0;
+        if (raw.RGFW_window_getDataDrag(handle, &x, &y) == 0) return null;
         return .{ .x = x, .y = y };
     }
 
@@ -693,6 +1111,62 @@ pub const Window = struct {
         return raw.RGFW_window_setMouseStandard(handle, @intFromEnum(cursor)) != 0;
     }
 
+    pub fn setCursor(window: *Window, cursor: *const CustomCursor) Error!void {
+        const handle = window.handle orelse return error.InactiveObject;
+        const cursor_handle = cursor.handle orelse return error.InactiveObject;
+        if (raw.RGFW_window_setMouse(handle, cursor_handle) == 0) {
+            return error.CursorAssignmentFailed;
+        }
+    }
+
+    pub fn resetCursor(window: *Window) Error!void {
+        const handle = window.handle orelse return error.InactiveObject;
+        if (raw.RGFW_window_setMouseDefault(handle) == 0) {
+            return error.CursorAssignmentFailed;
+        }
+    }
+
+    pub fn setIcon(window: *Window, image: Image, target: IconTarget) Error!void {
+        const handle = window.handle orelse return error.InactiveObject;
+        _ = try image.requiredBytes();
+        if (raw.RGFW_window_setIconEx(
+            handle,
+            image.pixels.ptr,
+            image.width,
+            image.height,
+            @intFromEnum(image.format),
+            @intFromEnum(target),
+        ) == 0) return error.IconAssignmentFailed;
+    }
+
+    pub fn enabledEvents(window: *const Window) HandleError!EventMask {
+        const handle = try window.rawHandle();
+        return EventMask.fromRaw(raw.RGFW_window_getEnabledEvents(handle));
+    }
+
+    pub fn setEnabledEvents(window: *Window, mask: EventMask) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setEnabledEvents(handle, mask.toRaw());
+    }
+
+    pub fn disableEvents(window: *Window, mask: EventMask) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setDisabledEvents(handle, mask.toRaw());
+    }
+
+    pub fn setEventEnabled(
+        window: *Window,
+        kind: EventKind,
+        enabled: bool,
+    ) HandleError!void {
+        const handle = try window.rawHandle();
+        raw.RGFW_window_setEventState(
+            handle,
+            EventMask.single(kind).toRaw(),
+            @intFromBool(enabled),
+        );
+    }
+
     pub fn monitor(window: *const Window) ?Monitor {
         const handle = window.handle orelse return null;
         const monitor_handle = raw.RGFW_window_getMonitor(handle);
@@ -755,6 +1229,11 @@ pub const Size = struct {
     height: i32,
 };
 
+fn validateSize(width: i32, height: i32) Window.Error!void {
+    if (width <= 0) return error.InvalidSize;
+    if (height <= 0) return error.InvalidSize;
+}
+
 pub const Point = struct {
     x: i32,
     y: i32,
@@ -816,8 +1295,103 @@ pub const WindowFlags = struct {
         return result;
     }
 
+    pub fn fromRaw(value: raw.RGFW_windowFlags) WindowFlags {
+        return .{
+            .no_border = hasFlag(value, raw.RGFW_windowNoBorder),
+            .no_resize = hasFlag(value, raw.RGFW_windowNoResize),
+            .allow_drag_and_drop = hasFlag(value, raw.RGFW_windowAllowDND),
+            .hide_mouse = hasFlag(value, raw.RGFW_windowHideMouse),
+            .fullscreen = hasFlag(value, raw.RGFW_windowFullscreen),
+            .translucent = hasFlag(value, raw.RGFW_windowTranslucent),
+            .centered = hasFlag(value, raw.RGFW_windowCenter),
+            .raw_mouse = hasFlag(value, raw.RGFW_windowRawMouse),
+            .scale_to_monitor = hasFlag(value, raw.RGFW_windowScaleToMonitor),
+            .hidden = hasFlag(value, raw.RGFW_windowHide),
+            .maximized = hasFlag(value, raw.RGFW_windowMaximize),
+            .center_cursor = hasFlag(value, raw.RGFW_windowCenterCursor),
+            .floating = hasFlag(value, raw.RGFW_windowFloating),
+            .focus_on_show = hasFlag(value, raw.RGFW_windowFocusOnShow),
+            .minimized = hasFlag(value, raw.RGFW_windowMinimize),
+            .focused = hasFlag(value, raw.RGFW_windowFocus),
+            .capture_mouse = hasFlag(value, raw.RGFW_windowCaptureMouse),
+            .open_gl = hasFlag(value, raw.RGFW_windowOpenGL),
+            .egl = hasFlag(value, raw.RGFW_windowEGL),
+        };
+    }
+
     fn addFlag(result: *raw.RGFW_windowFlags, enabled: bool, value: c_int) void {
         if (enabled) result.* |= @intCast(value);
+    }
+
+    fn hasFlag(value: raw.RGFW_windowFlags, flag: c_int) bool {
+        return value & @as(raw.RGFW_windowFlags, @intCast(flag)) != 0;
+    }
+};
+
+pub const EventMask = struct {
+    key_pressed: bool = false,
+    key_released: bool = false,
+    key_character: bool = false,
+    mouse_button_pressed: bool = false,
+    mouse_button_released: bool = false,
+    mouse_scroll: bool = false,
+    mouse_motion: bool = false,
+    mouse_raw_motion: bool = false,
+    mouse_enter: bool = false,
+    mouse_leave: bool = false,
+    window_moved: bool = false,
+    window_resized: bool = false,
+    window_focus_in: bool = false,
+    window_focus_out: bool = false,
+    window_refresh: bool = false,
+    window_close: bool = false,
+    window_maximized: bool = false,
+    window_minimized: bool = false,
+    window_restored: bool = false,
+    data_drop: bool = false,
+    data_drag: bool = false,
+    scale_updated: bool = false,
+    monitor_connected: bool = false,
+    monitor_disconnected: bool = false,
+
+    pub const all: EventMask = fromRaw(raw.RGFW_allEventFlags);
+    pub const keyboard: EventMask = fromRaw(raw.RGFW_keyEventsFlag);
+    pub const mouse: EventMask = fromRaw(raw.RGFW_mouseEventsFlag);
+    pub const window: EventMask = fromRaw(raw.RGFW_windowEventsFlag);
+    pub const focus: EventMask = fromRaw(raw.RGFW_windowFocusEventsFlag);
+    pub const drag_and_drop: EventMask = fromRaw(raw.RGFW_dataDragDropEventsFlag);
+    pub const monitor: EventMask = fromRaw(raw.RGFW_monitorEventsFlag);
+
+    pub fn single(kind: EventKind) EventMask {
+        var result: EventMask = .{};
+        switch (kind) {
+            .none => {},
+            inline else => |tag| @field(result, @tagName(tag)) = true,
+        }
+        return result;
+    }
+
+    pub fn toRaw(mask: EventMask) raw.RGFW_eventFlag {
+        @setEvalBranchQuota(10_000);
+        var result: raw.RGFW_eventFlag = 0;
+        inline for (@typeInfo(EventMask).@"struct".fields) |field| {
+            if (@field(mask, field.name)) {
+                const kind: EventKind = @field(EventKind, field.name);
+                result |= @as(raw.RGFW_eventFlag, 1) << @intCast(@intFromEnum(kind));
+            }
+        }
+        return result;
+    }
+
+    pub fn fromRaw(value: raw.RGFW_eventFlag) EventMask {
+        @setEvalBranchQuota(10_000);
+        var result: EventMask = .{};
+        inline for (@typeInfo(EventMask).@"struct".fields) |field| {
+            const kind: EventKind = @field(EventKind, field.name);
+            const flag = @as(raw.RGFW_eventFlag, 1) << @intCast(@intFromEnum(kind));
+            @field(result, field.name) = value & flag != 0;
+        }
+        return result;
     }
 };
 
@@ -966,6 +1540,16 @@ pub const Cursor = enum(raw.RGFW_mouseIcon) {
     pointing_hand = raw.RGFW_mousePointingHand,
     resize_horizontal = raw.RGFW_mouseResizeEW,
     resize_vertical = raw.RGFW_mouseResizeNS,
+    resize_northwest_southeast = raw.RGFW_mouseResizeNWSE,
+    resize_northeast_southwest = raw.RGFW_mouseResizeNESW,
+    resize_northwest = raw.RGFW_mouseResizeNW,
+    resize_north = raw.RGFW_mouseResizeN,
+    resize_northeast = raw.RGFW_mouseResizeNE,
+    resize_east = raw.RGFW_mouseResizeE,
+    resize_southeast = raw.RGFW_mouseResizeSE,
+    resize_south = raw.RGFW_mouseResizeS,
+    resize_southwest = raw.RGFW_mouseResizeSW,
+    resize_west = raw.RGFW_mouseResizeW,
     resize_all = raw.RGFW_mouseResizeAll,
     not_allowed = raw.RGFW_mouseNotAllowed,
     wait = raw.RGFW_mouseWait,
@@ -986,16 +1570,168 @@ pub const ImageFormat = enum(raw.RGFW_format) {
     argb8 = raw.RGFW_formatARGB8,
     bgra8 = raw.RGFW_formatBGRA8,
     abgr8 = raw.RGFW_formatABGR8,
+
+    pub fn channelCount(format: ImageFormat) u3 {
+        return switch (format) {
+            .rgb8, .bgr8 => 3,
+            .rgba8, .argb8, .bgra8, .abgr8 => 4,
+        };
+    }
 };
 
+pub const ImageError = error{
+    InvalidDimensions,
+    BufferTooSmall,
+};
+
+pub const ColorLayout = struct {
+    red_index: i32,
+    green_index: i32,
+    blue_index: i32,
+    alpha_index: i32,
+    channels: u32,
+
+    fn fromRaw(layout: raw.RGFW_colorLayout) ColorLayout {
+        return .{
+            .red_index = layout.r,
+            .green_index = layout.g,
+            .blue_index = layout.b,
+            .alpha_index = layout.a,
+            .channels = layout.channels,
+        };
+    }
+};
+
+pub const ImageConvertHandler = fn (
+    destination: []u8,
+    source: []const u8,
+    source_layout: ColorLayout,
+    destination_layout: ColorLayout,
+    pixel_count: usize,
+) void;
+
+pub fn imageConvertFunction(comptime handler: anytype) raw.RGFW_convertImageDataFunc {
+    if (@TypeOf(handler) != ImageConvertHandler) {
+        @compileError("image conversion handler must have type `rgfw.ImageConvertHandler`");
+    }
+    const Adapter = struct {
+        fn convert(
+            destination: [*c]u8,
+            source: [*c]u8,
+            source_layout: [*c]const raw.RGFW_colorLayout,
+            destination_layout: [*c]const raw.RGFW_colorLayout,
+            pixel_count: usize,
+        ) callconv(.c) void {
+            if (destination == null or source == null or
+                source_layout == null or destination_layout == null) return;
+            const source_length = std.math.mul(
+                usize,
+                pixel_count,
+                source_layout.*.channels,
+            ) catch return;
+            const destination_length = std.math.mul(
+                usize,
+                pixel_count,
+                destination_layout.*.channels,
+            ) catch return;
+            handler(
+                destination[0..destination_length],
+                source[0..source_length],
+                .fromRaw(source_layout.*),
+                .fromRaw(destination_layout.*),
+                pixel_count,
+            );
+        }
+    };
+    return Adapter.convert;
+}
+
+/// A caller-owned mutable pixel buffer. RGFW does not take ownership of the pixels.
+pub const Image = struct {
+    pixels: []u8,
+    width: i32,
+    height: i32,
+    format: ImageFormat,
+
+    pub fn init(
+        pixels: []u8,
+        width: i32,
+        height: i32,
+        format: ImageFormat,
+    ) ImageError!Image {
+        const image: Image = .{
+            .pixels = pixels,
+            .width = width,
+            .height = height,
+            .format = format,
+        };
+        _ = try image.requiredBytes();
+        return image;
+    }
+
+    pub fn requiredBytes(image: Image) ImageError!usize {
+        if (image.width <= 0) return error.InvalidDimensions;
+        if (image.height <= 0) return error.InvalidDimensions;
+        const pixel_count = std.math.mul(
+            usize,
+            @intCast(image.width),
+            @intCast(image.height),
+        ) catch return error.InvalidDimensions;
+        const byte_count = std.math.mul(
+            usize,
+            pixel_count,
+            image.format.channelCount(),
+        ) catch return error.InvalidDimensions;
+        if (image.pixels.len < byte_count) return error.BufferTooSmall;
+        return byte_count;
+    }
+};
+
+pub const IconTarget = enum(raw.RGFW_icon) {
+    taskbar = raw.RGFW_iconTaskbar,
+    window = raw.RGFW_iconWindow,
+    both = raw.RGFW_iconBoth,
+};
+
+/// An owning RGFW cursor. Do not copy a live value; call deinit exactly once per owner.
+pub const CustomCursor = struct {
+    handle: ?*raw.RGFW_mouse,
+
+    pub const Error = ImageError || error{CreationFailed};
+
+    pub fn init(
+        pixels: []u8,
+        width: i32,
+        height: i32,
+        format: ImageFormat,
+    ) Error!CustomCursor {
+        const image = try Image.init(pixels, width, height, format);
+        const handle = raw.RGFW_createMouse(
+            image.pixels.ptr,
+            image.width,
+            image.height,
+            @intFromEnum(image.format),
+        ) orelse return error.CreationFailed;
+        return .{ .handle = handle };
+    }
+
+    pub fn deinit(cursor: *CustomCursor) void {
+        const handle = cursor.handle orelse return;
+        raw.RGFW_freeMouse(handle);
+        cursor.handle = null;
+    }
+
+    pub fn rawHandle(cursor: *const CustomCursor) HandleError!*raw.RGFW_mouse {
+        return cursor.handle orelse error.InactiveObject;
+    }
+};
+
+/// An owning RGFW software surface borrowing its caller-owned pixel buffer.
+/// Do not copy a live value; keep pixels alive until idempotent deinit completes.
 pub const Surface = struct {
     handle: ?*raw.RGFW_surface,
 
-    pub const Error = error{
-        InvalidDimensions,
-        BufferTooSmall,
-        CreationFailed,
-    };
+    pub const Error = ImageError || error{CreationFailed};
 
     pub fn init(
         pixels: []u8,
@@ -1003,26 +1739,32 @@ pub const Surface = struct {
         height: i32,
         format: ImageFormat,
     ) Error!Surface {
-        if (width <= 0) return error.InvalidDimensions;
-        if (height <= 0) return error.InvalidDimensions;
-
-        const channels: usize = switch (format) {
-            .rgb8, .bgr8 => 3,
-            else => 4,
-        };
-        const pixel_count = std.math.mul(usize, @intCast(width), @intCast(height)) catch {
-            return error.InvalidDimensions;
-        };
-        const required_bytes = std.math.mul(usize, pixel_count, channels) catch {
-            return error.InvalidDimensions;
-        };
-        if (pixels.len < required_bytes) return error.BufferTooSmall;
-
+        const image = try Image.init(pixels, width, height, format);
         const handle = raw.RGFW_createSurface(
-            pixels.ptr,
-            width,
-            height,
-            @intFromEnum(format),
+            image.pixels.ptr,
+            image.width,
+            image.height,
+            @intFromEnum(image.format),
+        ) orelse return error.CreationFailed;
+        return .{ .handle = handle };
+    }
+
+    /// Creates a surface using this window's native visual, which is required for X11 safety.
+    pub fn initForWindow(
+        window: *const Window,
+        pixels: []u8,
+        width: i32,
+        height: i32,
+        format: ImageFormat,
+    ) (Error || HandleError)!Surface {
+        const image = try Image.init(pixels, width, height, format);
+        const window_handle = try window.rawHandle();
+        const handle = raw.RGFW_window_createSurface(
+            window_handle,
+            image.pixels.ptr,
+            image.width,
+            image.height,
+            @intFromEnum(image.format),
         ) orelse return error.CreationFailed;
         return .{ .handle = handle };
     }
@@ -1037,39 +1779,333 @@ pub const Surface = struct {
         return surface.handle orelse error.InactiveObject;
     }
 
-    pub fn blit(surface: *const Surface, window: *const Window) void {
-        const surface_handle = surface.handle orelse return;
-        const window_handle = window.handle orelse return;
+    /// Returns a native image borrowed until this Surface is deinitialized.
+    pub fn nativeImage(surface: *const Surface) HandleError!*raw.RGFW_nativeImage {
+        const handle = try surface.rawHandle();
+        return raw.RGFW_surface_getNativeImage(handle) orelse error.NativeHandleUnavailable;
+    }
+
+    pub fn setConvertFunction(surface: *Surface, comptime handler: anytype) HandleError!void {
+        return surface.setRawConvertFunction(imageConvertFunction(handler));
+    }
+
+    /// Low-level escape hatch for an existing C-compatible conversion callback.
+    pub fn setRawConvertFunction(
+        surface: *Surface,
+        function: raw.RGFW_convertImageDataFunc,
+    ) HandleError!void {
+        const handle = try surface.rawHandle();
+        raw.RGFW_surface_setConvertFunc(handle, function);
+    }
+
+    pub fn blit(surface: *const Surface, window: *const Window) HandleError!void {
+        const surface_handle = try surface.rawHandle();
+        const window_handle = try window.rawHandle();
         raw.RGFW_window_blitSurface(window_handle, surface_handle);
     }
 };
 
+pub const ImageUtility = struct {
+    pub fn nativeFormat() ImageFormat {
+        return @enumFromInt(raw.RGFW_nativeFormat());
+    }
+
+    pub fn copy(source: Image, destination: Image) ImageError!void {
+        return copyRaw(source, destination, null);
+    }
+
+    pub fn copyWith(
+        source: Image,
+        destination: Image,
+        comptime handler: anytype,
+    ) ImageError!void {
+        return copyRaw(source, destination, imageConvertFunction(handler));
+    }
+
+    fn copyRaw(
+        source: Image,
+        destination: Image,
+        converter: raw.RGFW_convertImageDataFunc,
+    ) ImageError!void {
+        if (source.width != destination.width) return error.InvalidDimensions;
+        if (source.height != destination.height) return error.InvalidDimensions;
+        _ = try source.requiredBytes();
+        _ = try destination.requiredBytes();
+        raw.RGFW_copyImageData(
+            destination.pixels.ptr,
+            destination.width,
+            destination.height,
+            @intFromEnum(destination.format),
+            source.pixels.ptr,
+            @intFromEnum(source.format),
+            converter,
+        );
+    }
+};
+
+pub const MonitorMode = struct {
+    width: i32,
+    height: i32,
+    refresh_rate: f32,
+    red_bits: u8,
+    green_bits: u8,
+    blue_bits: u8,
+
+    fn fromRaw(mode: raw.RGFW_monitorMode) MonitorMode {
+        return .{
+            .width = mode.w,
+            .height = mode.h,
+            .refresh_rate = mode.refreshRate,
+            .red_bits = mode.red,
+            .green_bits = mode.green,
+            .blue_bits = mode.blue,
+        };
+    }
+
+    fn toRaw(mode: MonitorMode) raw.RGFW_monitorMode {
+        return .{
+            .w = mode.width,
+            .h = mode.height,
+            .refreshRate = mode.refresh_rate,
+            .red = mode.red_bits,
+            .green = mode.green_bits,
+            .blue = mode.blue_bits,
+            .src = null,
+        };
+    }
+
+    pub fn matches(first: MonitorMode, second: MonitorMode, request: ModeRequest) bool {
+        var first_raw = first.toRaw();
+        var second_raw = second.toRaw();
+        return raw.RGFW_monitorModeCompare(
+            &first_raw,
+            &second_raw,
+            request.toRaw(),
+        ) != 0;
+    }
+};
+
+pub const ModeRequest = struct {
+    scale: bool = false,
+    refresh_rate: bool = false,
+    color_depth: bool = false,
+
+    pub const all: ModeRequest = .{
+        .scale = true,
+        .refresh_rate = true,
+        .color_depth = true,
+    };
+
+    pub fn toRaw(request: ModeRequest) raw.RGFW_modeRequest {
+        var result: raw.RGFW_modeRequest = 0;
+        if (request.scale) result |= @intCast(raw.RGFW_monitorScale);
+        if (request.refresh_rate) result |= @intCast(raw.RGFW_monitorRefresh);
+        if (request.color_depth) result |= @intCast(raw.RGFW_monitorRGB);
+        return result;
+    }
+};
+
+pub const PhysicalSize = struct {
+    width_mm: f32,
+    height_mm: f32,
+};
+
+pub const GammaRamp = struct {
+    red: []const u16,
+    green: []const u16,
+    blue: []const u16,
+
+    fn validate(ramp: GammaRamp) Monitor.Error!void {
+        if (ramp.red.len == 0) return error.InvalidGammaRamp;
+        if (ramp.green.len != ramp.red.len) return error.InvalidGammaRamp;
+        if (ramp.blue.len != ramp.red.len) return error.InvalidGammaRamp;
+    }
+};
+
+pub const OwnedGammaRamp = struct {
+    storage: []u16,
+    count: usize,
+
+    pub fn value(ramp: *const OwnedGammaRamp) GammaRamp {
+        return .{
+            .red = ramp.storage[0..ramp.count],
+            .green = ramp.storage[ramp.count .. ramp.count * 2],
+            .blue = ramp.storage[ramp.count * 2 .. ramp.count * 3],
+        };
+    }
+
+    pub fn deinit(ramp: *OwnedGammaRamp, gpa: std.mem.Allocator) void {
+        if (ramp.storage.len == 0) return;
+        gpa.free(ramp.storage);
+        ramp.storage = &.{};
+        ramp.count = 0;
+    }
+};
+
+/// A monitor borrowed from Context until monitor refresh or Context.deinit.
 pub const Monitor = struct {
     handle: *raw.RGFW_monitor,
+
+    pub const Error = error{
+        QueryFailed,
+        ModeUnavailable,
+        ModeChangeFailed,
+        InvalidGamma,
+        InvalidGammaRamp,
+        GammaChangeFailed,
+    };
 
     pub fn rawHandle(monitor: *const Monitor) *raw.RGFW_monitor {
         return monitor.handle;
     }
 
-    pub fn name(monitor: *const Monitor) [:0]const u8 {
+    /// Returns a name borrowed until monitor refresh or Context.deinit.
+    pub fn name(monitor: *const Monitor) ?[:0]const u8 {
         const name_ptr = raw.RGFW_monitor_getName(monitor.handle);
+        if (name_ptr == null) return null;
         return std.mem.span(@as([*:0]const u8, @ptrCast(name_ptr)));
     }
 
-    pub fn setGamma(monitor: *Monitor, gamma: f32) bool {
-        return raw.RGFW_monitor_setGamma(monitor.handle, gamma) != 0;
+    pub fn setGamma(monitor: *Monitor, gamma: f32) Error!void {
+        if (!(gamma > 0.0)) return error.InvalidGamma;
+        if (raw.RGFW_monitor_setGamma(monitor.handle, gamma) == 0) {
+            return error.GammaChangeFailed;
+        }
     }
 
-    pub fn workArea(monitor: *const Monitor) Rect {
+    pub fn workArea(monitor: *const Monitor) Error!Rect {
         var area: Rect = .{ .x = 0, .y = 0, .width = 0, .height = 0 };
-        _ = raw.RGFW_monitor_getWorkarea(
+        if (raw.RGFW_monitor_getWorkarea(
             monitor.handle,
             &area.x,
             &area.y,
             &area.width,
             &area.height,
-        );
+        ) == 0) return error.QueryFailed;
         return area;
+    }
+
+    pub fn position(monitor: *const Monitor) Error!Point {
+        var point: Point = .{ .x = 0, .y = 0 };
+        if (raw.RGFW_monitor_getPosition(monitor.handle, &point.x, &point.y) == 0) {
+            return error.QueryFailed;
+        }
+        return point;
+    }
+
+    pub fn scale(monitor: *const Monitor) Error!Vector {
+        var result: Vector = .{ .x = 0, .y = 0 };
+        if (raw.RGFW_monitor_getScale(monitor.handle, &result.x, &result.y) == 0) {
+            return error.QueryFailed;
+        }
+        return result;
+    }
+
+    pub fn physicalSize(monitor: *const Monitor) Error!PhysicalSize {
+        var result: PhysicalSize = .{ .width_mm = 0, .height_mm = 0 };
+        if (raw.RGFW_monitor_getPhysicalSize(
+            monitor.handle,
+            &result.width_mm,
+            &result.height_mm,
+        ) == 0) return error.QueryFailed;
+        return result;
+    }
+
+    pub fn currentMode(monitor: *const Monitor) Error!MonitorMode {
+        var mode: raw.RGFW_monitorMode = undefined;
+        if (raw.RGFW_monitor_getMode(monitor.handle, &mode) == 0) {
+            return error.ModeUnavailable;
+        }
+        return .fromRaw(mode);
+    }
+
+    pub fn supportedModes(
+        monitor: *const Monitor,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)![]MonitorMode {
+        var count: usize = 0;
+        const modes = raw.RGFW_monitor_getModes(monitor.handle, &count);
+        if (modes == null) return error.ModeUnavailable;
+        defer raw.RGFW_freeModes(modes);
+
+        const result = try gpa.alloc(MonitorMode, count);
+        for (modes[0..count], result) |mode, *destination| {
+            destination.* = .fromRaw(mode);
+        }
+        return result;
+    }
+
+    pub fn closestMode(
+        monitor: *const Monitor,
+        requested: MonitorMode,
+    ) Error!MonitorMode {
+        var requested_raw = requested.toRaw();
+        var closest_raw: raw.RGFW_monitorMode = undefined;
+        if (raw.RGFW_monitor_findClosestMode(
+            monitor.handle,
+            &requested_raw,
+            &closest_raw,
+        ) == 0) return error.ModeUnavailable;
+        return .fromRaw(closest_raw);
+    }
+
+    pub fn requestMode(
+        monitor: *Monitor,
+        requested: MonitorMode,
+        request: ModeRequest,
+    ) Error!void {
+        var requested_raw = requested.toRaw();
+        if (raw.RGFW_monitor_requestMode(
+            monitor.handle,
+            &requested_raw,
+            request.toRaw(),
+        ) == 0) return error.ModeChangeFailed;
+    }
+
+    pub fn setMode(monitor: *Monitor, mode: MonitorMode) Error!void {
+        var mode_raw = mode.toRaw();
+        if (raw.RGFW_monitor_setMode(monitor.handle, &mode_raw) == 0) {
+            return error.ModeChangeFailed;
+        }
+    }
+
+    pub fn scaleToWindow(monitor: *Monitor, window: *Window) (Error || HandleError)!void {
+        const window_handle = try window.rawHandle();
+        if (raw.RGFW_monitor_scaleToWindow(monitor.handle, window_handle) == 0) {
+            return error.ModeChangeFailed;
+        }
+    }
+
+    pub fn gammaRamp(
+        monitor: *const Monitor,
+        gpa: std.mem.Allocator,
+    ) (Error || std.mem.Allocator.Error)!OwnedGammaRamp {
+        const native = raw.RGFW_monitor_getGammaRamp(monitor.handle);
+        if (native == null) return error.QueryFailed;
+        defer raw.RGFW_freeGammaRamp(native);
+        if (native.*.count == 0) return error.QueryFailed;
+
+        const count = native.*.count;
+        const storage = try gpa.alloc(u16, std.math.mul(usize, count, 3) catch {
+            return error.QueryFailed;
+        });
+        @memcpy(storage[0..count], native.*.red[0..count]);
+        @memcpy(storage[count .. count * 2], native.*.green[0..count]);
+        @memcpy(storage[count * 2 .. count * 3], native.*.blue[0..count]);
+        return .{ .storage = storage, .count = count };
+    }
+
+    pub fn setGammaRamp(monitor: *Monitor, ramp: GammaRamp) Error!void {
+        try ramp.validate();
+        var native: raw.RGFW_gammaRamp = .{
+            .red = @ptrCast(@constCast(ramp.red.ptr)),
+            .green = @ptrCast(@constCast(ramp.green.ptr)),
+            .blue = @ptrCast(@constCast(ramp.blue.ptr)),
+            .count = ramp.red.len,
+        };
+        if (raw.RGFW_monitor_setGammaRamp(monitor.handle, &native) == 0) {
+            return error.GammaChangeFailed;
+        }
     }
 };
 
@@ -1080,10 +2116,191 @@ pub const Rect = struct {
     height: i32,
 };
 
+pub const GraphicsProfile = enum(i32) {
+    core = 0,
+    forward_compatible = 1,
+    compatibility = 2,
+    embedded = 3,
+    web = 4,
+};
+
+pub const GraphicsRenderer = enum(i32) {
+    accelerated = 0,
+    software = 1,
+};
+
+pub const GraphicsReleaseBehavior = enum(i32) {
+    flush = 0,
+    none = 1,
+};
+
+pub const GraphicsHints = struct {
+    stencil_bits: i32 = 0,
+    samples: i32 = 0,
+    stereo: bool = false,
+    auxiliary_buffers: i32 = 0,
+    double_buffer: bool = true,
+    red_bits: i32 = 8,
+    green_bits: i32 = 8,
+    blue_bits: i32 = 8,
+    alpha_bits: i32 = 8,
+    depth_bits: i32 = 24,
+    accumulation_red_bits: i32 = 0,
+    accumulation_green_bits: i32 = 0,
+    accumulation_blue_bits: i32 = 0,
+    accumulation_alpha_bits: i32 = 0,
+    srgb: bool = false,
+    robustness: bool = false,
+    debug: bool = false,
+    no_error: bool = false,
+    release_behavior: GraphicsReleaseBehavior = .none,
+    profile: GraphicsProfile = .core,
+    major_version: i32 = 1,
+    minor_version: i32 = 0,
+    renderer: GraphicsRenderer = .accelerated,
+};
+
+pub const Graphics = if (features.opengl or features.egl) struct {
+    /// Stable storage for RGFW's borrowed global-hints pointer.
+    pub const GlobalHints = struct {
+        raw_value: raw.RGFW_glHints,
+
+        pub fn init(hints: GraphicsHints) GlobalHints {
+            return .{ .raw_value = toRaw(hints, null, null) };
+        }
+    };
+
+    /// RGFW borrows this pointer until resetGlobalHints or Context.deinit.
+    pub fn setGlobalHints(hints: *GlobalHints) void {
+        raw.RGFW_setGlobalHints_OpenGL(&hints.raw_value);
+    }
+
+    pub fn resetGlobalHints() void {
+        raw.RGFW_resetGlobalHints_OpenGL();
+    }
+
+    /// Returns the currently installed RGFW hint values by copy.
+    pub fn currentGlobalHints() ?GraphicsHints {
+        const hints = raw.RGFW_getGlobalHints_OpenGL() orelse return null;
+        return fromRaw(hints.*);
+    }
+
+    fn fromRaw(hints: raw.RGFW_glHints) GraphicsHints {
+        return .{
+            .stencil_bits = hints.stencil,
+            .samples = hints.samples,
+            .stereo = hints.stereo != 0,
+            .auxiliary_buffers = hints.auxBuffers,
+            .double_buffer = hints.doubleBuffer != 0,
+            .red_bits = hints.red,
+            .green_bits = hints.green,
+            .blue_bits = hints.blue,
+            .alpha_bits = hints.alpha,
+            .depth_bits = hints.depth,
+            .accumulation_red_bits = hints.accumRed,
+            .accumulation_green_bits = hints.accumGreen,
+            .accumulation_blue_bits = hints.accumBlue,
+            .accumulation_alpha_bits = hints.accumAlpha,
+            .srgb = hints.sRGB != 0,
+            .robustness = hints.robustness != 0,
+            .debug = hints.debug != 0,
+            .no_error = hints.noError != 0,
+            .release_behavior = @enumFromInt(hints.releaseBehavior),
+            .profile = @enumFromInt(hints.profile),
+            .major_version = hints.major,
+            .minor_version = hints.minor,
+            .renderer = @enumFromInt(hints.renderer),
+        };
+    }
+
+    fn toRaw(
+        hints: GraphicsHints,
+        share_opengl: ?*raw.RGFW_glContext,
+        share_egl: ?*raw.RGFW_eglContext,
+    ) raw.RGFW_glHints {
+        return .{
+            .stencil = hints.stencil_bits,
+            .samples = hints.samples,
+            .stereo = @intFromBool(hints.stereo),
+            .auxBuffers = hints.auxiliary_buffers,
+            .doubleBuffer = @intFromBool(hints.double_buffer),
+            .red = hints.red_bits,
+            .green = hints.green_bits,
+            .blue = hints.blue_bits,
+            .alpha = hints.alpha_bits,
+            .depth = hints.depth_bits,
+            .accumRed = hints.accumulation_red_bits,
+            .accumGreen = hints.accumulation_green_bits,
+            .accumBlue = hints.accumulation_blue_bits,
+            .accumAlpha = hints.accumulation_alpha_bits,
+            .sRGB = @intFromBool(hints.srgb),
+            .robustness = @intFromBool(hints.robustness),
+            .debug = @intFromBool(hints.debug),
+            .noError = @intFromBool(hints.no_error),
+            .releaseBehavior = @intFromEnum(hints.release_behavior),
+            .profile = @intFromEnum(hints.profile),
+            .major = hints.major_version,
+            .minor = hints.minor_version,
+            .share = share_opengl,
+            .shareEGL = share_egl,
+            .renderer = @intFromEnum(hints.renderer),
+        };
+    }
+} else struct {
+    pub fn requireEnabled() void {
+        @compileError("RGFW OpenGL/EGL support is disabled");
+    }
+};
+
 pub const OpenGL = if (features.opengl) struct {
+    const API = @This();
+
+    pub const Error = error{ContextCreationFailed};
+
+    /// A context owned by its Window. Never deinitialize or retain it past the Window.
+    pub const Context = struct {
+        handle: *raw.RGFW_glContext,
+
+        pub fn rawHandle(graphics_context: @This()) *raw.RGFW_glContext {
+            return graphics_context.handle;
+        }
+
+        pub fn nativeHandle(graphics_context: @This()) ?*anyopaque {
+            return raw.RGFW_glContext_getSourceContext(graphics_context.handle);
+        }
+    };
+
+    pub const ContextOptions = struct {
+        hints: GraphicsHints = .{},
+        share: ?API.Context = null,
+    };
+
+    pub fn createContext(
+        window: *Window,
+        options: ContextOptions,
+    ) (Error || HandleError)!API.Context {
+        const handle = try window.rawHandle();
+        var hints = Graphics.toRaw(
+            options.hints,
+            if (options.share) |shared| shared.handle else null,
+            null,
+        );
+        const context = raw.RGFW_window_createContext_OpenGL(handle, &hints) orelse {
+            return error.ContextCreationFailed;
+        };
+        return .{ .handle = context };
+    }
+
+    /// Returns a context borrowed until its Window is deinitialized.
+    pub fn getContext(window: *const Window) ?API.Context {
+        const handle = window.handle orelse return null;
+        const context_handle = raw.RGFW_window_getContext_OpenGL(handle) orelse return null;
+        return .{ .handle = context_handle };
+    }
+
     pub fn makeCurrent(window: ?*const Window) void {
         const handle = if (window) |value| value.handle else null;
-        raw.RGFW_window_makeCurrentContext_OpenGL(handle);
+        raw.RGFW_window_makeCurrentWindow_OpenGL(handle);
     }
 
     pub fn swapBuffers(window: *const Window) void {
@@ -1095,12 +2312,97 @@ pub const OpenGL = if (features.opengl) struct {
         const handle = window.handle orelse return;
         raw.RGFW_window_swapInterval_OpenGL(handle, interval);
     }
-} else struct {};
+
+    pub fn load(comptime Function: type, name: [:0]const u8) Function {
+        const function = raw.RGFW_getProcAddress_OpenGL(name.ptr) orelse return null;
+        return @ptrCast(function);
+    }
+
+    pub fn extensionSupported(extension: []const u8) bool {
+        return raw.RGFW_extensionSupported_OpenGL(extension.ptr, extension.len) != 0;
+    }
+
+    pub fn platformExtensionSupported(extension: []const u8) bool {
+        return raw.RGFW_extensionSupportedPlatform_OpenGL(
+            extension.ptr,
+            extension.len,
+        ) != 0;
+    }
+
+    pub fn currentNativeContext() ?*anyopaque {
+        return raw.RGFW_getCurrentContext_OpenGL();
+    }
+
+    pub fn isCurrent(window: *const Window) bool {
+        const handle = window.handle orelse return false;
+        return raw.RGFW_getCurrentWindow_OpenGL() == handle;
+    }
+} else struct {
+    pub fn requireEnabled() void {
+        @compileError("RGFW OpenGL support is disabled; build with -Dopengl=true");
+    }
+};
 
 pub const EGL = if (features.egl) struct {
-    pub fn makeCurrent(window: *const Window) void {
-        const handle = window.handle orelse return;
-        raw.RGFW_window_makeCurrentContext_EGL(handle);
+    const API = @This();
+
+    pub const Error = error{ContextCreationFailed};
+
+    /// A context owned by its Window. Never deinitialize or retain it past the Window.
+    pub const Context = struct {
+        handle: *raw.RGFW_eglContext,
+
+        pub fn rawHandle(graphics_context: @This()) *raw.RGFW_eglContext {
+            return graphics_context.handle;
+        }
+
+        pub fn nativeHandle(graphics_context: @This()) ?*anyopaque {
+            return raw.RGFW_eglContext_getSourceContext(graphics_context.handle);
+        }
+
+        pub fn surfaceHandle(graphics_context: @This()) ?*anyopaque {
+            return raw.RGFW_eglContext_getSurface(graphics_context.handle);
+        }
+
+        pub fn waylandWindowHandle(graphics_context: @This()) ?*anyopaque {
+            const handle = raw.RGFW_eglContext_wlEGLWindow(graphics_context.handle) orelse {
+                return null;
+            };
+            return @ptrCast(handle);
+        }
+    };
+
+    pub const ContextOptions = struct {
+        hints: GraphicsHints = .{},
+        share: ?API.Context = null,
+    };
+
+    pub fn createContext(
+        window: *Window,
+        options: ContextOptions,
+    ) (Error || HandleError)!API.Context {
+        const handle = try window.rawHandle();
+        var hints = Graphics.toRaw(
+            options.hints,
+            null,
+            if (options.share) |shared| shared.handle else null,
+        );
+        const context_handle = raw.RGFW_window_createContext_EGL(handle, &hints) orelse {
+            return error.ContextCreationFailed;
+        };
+        return .{ .handle = context_handle };
+    }
+
+    /// Returns a context borrowed until its Window is deinitialized.
+    pub fn getContext(window: *const Window) ?API.Context {
+        const handle = window.handle orelse return null;
+        const context_handle = raw.RGFW_window_getContext_EGL(handle) orelse return null;
+        return .{ .handle = context_handle };
+    }
+
+    pub fn makeCurrent(window: ?*const Window) void {
+        const handle = if (window) |value| value.handle else null;
+        raw.RGFW_window_makeCurrentWindow_EGL(handle);
     }
 
     pub fn swapBuffers(window: *const Window) void {
@@ -1112,7 +2414,110 @@ pub const EGL = if (features.egl) struct {
         const handle = window.handle orelse return;
         raw.RGFW_window_swapInterval_EGL(handle, interval);
     }
-} else struct {};
+
+    pub fn load(comptime Function: type, name: [:0]const u8) Function {
+        const function = raw.RGFW_getProcAddress_EGL(name.ptr) orelse return null;
+        return @ptrCast(function);
+    }
+
+    pub fn extensionSupported(extension: []const u8) bool {
+        return raw.RGFW_extensionSupported_EGL(extension.ptr, extension.len) != 0;
+    }
+
+    pub fn platformExtensionSupported(extension: []const u8) bool {
+        return raw.RGFW_extensionSupportedPlatform_EGL(extension.ptr, extension.len) != 0;
+    }
+
+    pub fn displayHandle() ?*anyopaque {
+        return raw.RGFW_getDisplay_EGL();
+    }
+
+    pub fn currentNativeContext() ?*anyopaque {
+        return raw.RGFW_getCurrentContext_EGL();
+    }
+
+    pub fn isCurrent(window: *const Window) bool {
+        const handle = window.handle orelse return false;
+        return raw.RGFW_getCurrentWindow_EGL() == handle;
+    }
+} else struct {
+    pub fn requireEnabled() void {
+        @compileError("RGFW EGL support is disabled; build with -Degl=true");
+    }
+};
+
+pub const DirectX = if (features.directx) struct {
+    pub const Error = error{SwapChainCreationFailed};
+
+    extern fn RGFW_window_createSwapChain_DirectX(
+        window: *raw.RGFW_window,
+        factory: *anyopaque,
+        device: *anyopaque,
+        swap_chain: *?*anyopaque,
+    ) callconv(.c) i32;
+
+    /// Creates an IDXGISwapChain while preserving the consumer package's COM type.
+    pub fn createSwapChain(
+        comptime SwapChain: type,
+        window: *Window,
+        factory: anytype,
+        device: anytype,
+    ) (Error || HandleError)!SwapChain {
+        comptime requireNonOptionalPointer(SwapChain, "DirectX swap-chain type");
+        const native_window = try window.rawHandle();
+        var swap_chain: ?*anyopaque = null;
+        const result = RGFW_window_createSwapChain_DirectX(
+            native_window,
+            eraseNonOptionalPointer(factory, "DirectX factory"),
+            eraseNonOptionalPointer(device, "DirectX device"),
+            &swap_chain,
+        );
+        if (result != 0) return error.SwapChainCreationFailed;
+        return @ptrCast(swap_chain orelse return error.SwapChainCreationFailed);
+    }
+} else struct {
+    pub fn requireEnabled() void {
+        @compileError("RGFW DirectX support is disabled; build for Windows with -Ddirectx=true");
+    }
+};
+
+pub const WebGPU = if (features.webgpu) struct {
+    pub const Instance = raw.WGPUInstance;
+    pub const Surface = raw.WGPUSurface;
+    pub const Error = error{SurfaceCreationFailed};
+
+    pub fn createSurface(window: *const Window, instance: Instance) Error!@This().Surface {
+        const native_window = window.handle orelse return error.SurfaceCreationFailed;
+        const surface = raw.RGFW_window_createSurface_WebGPU(native_window, instance);
+        return surface orelse error.SurfaceCreationFailed;
+    }
+
+    /// Creates a surface while preserving ABI-compatible handles from a WebGPU package.
+    pub fn createSurfaceAs(
+        comptime ForeignSurface: type,
+        window: *const Window,
+        foreign_instance: anytype,
+    ) Error!ForeignSurface {
+        const ForeignInstance = @TypeOf(foreign_instance);
+        comptime {
+            requireNullablePointerHandle(ForeignInstance, "foreign WebGPU instance");
+            requireNullablePointerHandle(ForeignSurface, "foreign WebGPU surface");
+            if (@sizeOf(ForeignInstance) != @sizeOf(Instance)) {
+                @compileError("foreign WebGPU instance has an incompatible ABI size");
+            }
+            if (@sizeOf(ForeignSurface) != @sizeOf(@This().Surface)) {
+                @compileError("foreign WebGPU surface has an incompatible ABI size");
+            }
+        }
+        const instance: Instance = @bitCast(foreign_instance);
+        const surface = try createSurface(window, instance);
+        return @bitCast(surface);
+    }
+} else struct {
+    pub fn requireEnabled() void {
+        @compileError("RGFW WebGPU support is disabled; build with -Dwebgpu=true");
+    }
+};
 
 pub const KeyModifiers = struct {
     caps_lock: bool = false,
@@ -1491,6 +2896,8 @@ var event_handler_slots: [raw.RGFW_eventCount]?EventHandlerSlot =
     @splat(@as(?EventHandlerSlot, null));
 var event_handler_generation: u64 = 0;
 
+/// An owning callback installation. Do not copy; deinit once in reverse installation order.
+/// deinit is idempotent and must run before Context.deinit.
 pub const EventSubscription = struct {
     kind: EventKind,
     previous_callback: raw.RGFW_genericFunc,
@@ -1614,6 +3021,29 @@ fn requireContextPointer(comptime ContextPointer: type, comptime role: []const u
     if (pointer.size != .one or pointer.is_allowzero) {
         @compileError(role ++ " must be a non-optional single-item pointer");
     }
+}
+
+fn requireNonOptionalPointer(comptime Pointer: type, comptime role: []const u8) void {
+    const pointer = switch (@typeInfo(Pointer)) {
+        .pointer => |pointer| pointer,
+        else => @compileError(role ++ " must be a non-optional pointer"),
+    };
+    if (pointer.size != .one and pointer.size != .c) {
+        @compileError(role ++ " must be a single-item or C pointer");
+    }
+}
+
+fn eraseNonOptionalPointer(value: anytype, comptime role: []const u8) *anyopaque {
+    comptime requireNonOptionalPointer(@TypeOf(value), role);
+    return @ptrCast(@constCast(value));
+}
+
+fn requireNullablePointerHandle(comptime Handle: type, comptime role: []const u8) void {
+    const child = switch (@typeInfo(Handle)) {
+        .optional => |optional| optional.child,
+        else => @compileError(role ++ " must be an optional pointer handle"),
+    };
+    requireNonOptionalPointer(child, role);
 }
 
 fn eventPayloadAs(
@@ -1758,6 +3188,19 @@ pub const Vulkan = if (features.vulkan) struct {
         };
     }
 
+    /// Infers the foreign surface handle from the owner's adoptSurface method.
+    pub fn createOwnedSurface(
+        window: *const Window,
+        foreign_instance_owner: anytype,
+    ) OwnedSurfaceResult(@TypeOf(foreign_instance_owner)) {
+        const ForeignSurface = AdoptedSurfaceHandle(@TypeOf(foreign_instance_owner));
+        return createOwnedSurfaceAs(
+            ForeignSurface,
+            window,
+            foreign_instance_owner,
+        );
+    }
+
     pub fn presentationSupported(
         instance: Instance,
         physical_device: PhysicalDevice,
@@ -1768,6 +3211,31 @@ pub const Vulkan = if (features.vulkan) struct {
             physical_device,
             queue_family_index,
         ) != 0;
+    }
+
+    pub fn presentationSupportedAs(
+        foreign_instance: anytype,
+        foreign_physical_device: anytype,
+        queue_family_index: u32,
+    ) bool {
+        const instance = castCompatibleHandle(Instance, foreign_instance);
+        const physical_device = castCompatibleHandle(
+            PhysicalDevice,
+            foreign_physical_device,
+        );
+        return presentationSupported(instance, physical_device, queue_family_index);
+    }
+
+    pub fn load(
+        comptime Function: type,
+        instance: Instance,
+        name: [:0]const u8,
+    ) Function {
+        const function = raw.RGFW_getInstanceProcAddress_Vulkan(
+            instance,
+            name.ptr,
+        ) orelse return null;
+        return @ptrCast(function);
     }
 
     fn handleRepresentation(comptime Handle: type) ?HandleRepresentation {
@@ -1873,6 +3341,26 @@ pub const Vulkan = if (features.vulkan) struct {
         };
         return (SurfaceError || raw_error_union.error_set || adopt_error_union.error_set)!adopt_error_union.payload;
     }
+
+    fn AdoptedSurfaceHandle(comptime OwnerPointer: type) type {
+        const Owner = switch (@typeInfo(OwnerPointer)) {
+            .pointer => |pointer| if (pointer.size == .one)
+                pointer.child
+            else
+                @compileError("foreign Vulkan instance owner must be a single-item pointer"),
+            else => @compileError("foreign Vulkan instance owner must be a single-item pointer"),
+        };
+        if (!@hasDecl(Owner, "adoptSurface")) {
+            @compileError("foreign Vulkan instance owner must provide an adoptSurface method");
+        }
+        const function = @typeInfo(@TypeOf(Owner.adoptSurface)).@"fn";
+        if (function.params.len < 2) {
+            @compileError("foreign Vulkan adoptSurface method must accept a surface handle");
+        }
+        return function.params[1].type orelse {
+            @compileError("foreign Vulkan adoptSurface surface parameter must have a concrete type");
+        };
+    }
 } else struct {
     pub fn requireEnabled() void {
         @compileError("RGFW Vulkan support is disabled; pass `.vulkan = true` to the dependency");
@@ -1935,4 +3423,17 @@ test "Vulkan foreign handles preserve their ABI representation" {
         @intFromPtr(native_surface.?),
         @intFromPtr(surface_round_trip.?),
     );
+}
+
+test "Vulkan owned-surface API infers a foreign surface parameter" {
+    if (!features.vulkan) return;
+
+    const ForeignSurfaceOpaque = opaque {};
+    const ForeignSurface = ?*ForeignSurfaceOpaque;
+    const Owner = struct {
+        fn adoptSurface(_: *@This(), _: ForeignSurface, _: ?*anyopaque) error{AdoptionFailed}!u8 {
+            return 1;
+        }
+    };
+    try std.testing.expect(Vulkan.AdoptedSurfaceHandle(*Owner) == ForeignSurface);
 }

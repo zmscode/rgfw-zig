@@ -14,6 +14,11 @@
             .hash = "N-V-__8AAItrbQBen6_Wl2eZ2ax6B0G6qtKys7_uVz224o99",
             .lazy = true,
         },
+        .webgpu_headers = .{
+            .url = "https://github.com/webgpu-native/webgpu-headers/archive/b3f67b89929c133403fd95638be4ef96b56ddca0.tar.gz",
+            .hash = "N-V-__8AACPsCwBWBWk5q8Xr9mDtCf8TD3UM1Wlp3JflE6mh",
+            .lazy = true,
+        },
         .rgfw_upstream = .{
             .url = "https://github.com/ColleagueRiley/RGFW/archive/e4db7970bad99a3a51d885290c2d4749f8a49b88.tar.gz",
             .hash = "N-V-__8AAOZeOAA3GmLsEQnDky9oAPlSM1r5ke5MfZdXOFzT",

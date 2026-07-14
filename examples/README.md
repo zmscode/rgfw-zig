@@ -12,6 +12,7 @@ zig build examples
 zig build examples -Dopengl=true
 zig build examples -Degl=true
 zig build examples -Dvulkan=true
+zig build examples -Dcustom-allocator=true
 ```
 
 Each enabled example also gets a run step. For example:
@@ -30,9 +31,9 @@ zig build run-vk-zig -Dvulkan=true -Dvk-zig-example=true
 | --- | --- | --- |
 | `callbacks` | `callbacks.zig` | Base |
 | `clipboard` | `clipboard.zig` | Base |
-| `custom-backend` | `custom_backend.zig` | Base/native handle |
-| `custom_alloc` | `custom_alloc.zig` | Base |
-| `dx11` | `dx11.zig` | Windows |
+| `custom-backend` | `custom_backend.zig` | `-Dwindow-system=custom -Dcustom-backend-header=/absolute/path` |
+| `custom_alloc` | `custom_alloc.zig` | `-Dcustom-allocator=true` |
+| `dx11` | `dx11.zig` | Windows and `-Ddirectx=true` |
 | `egl` | `egl.zig` | `-Degl=true` |
 | `event_queue` | `event_queue.zig` | Base |
 | `first-person-camera` | `first_person_camera.zig` | `-Dopengl=true` |
@@ -60,6 +61,7 @@ zig build run-vk-zig -Dvulkan=true -Dvk-zig-example=true
 | `surface` | `surface.zig` | Base |
 | `vk10` | `vk10.zig` | `-Dvulkan=true` |
 | `window_icons` | `window_icons.zig` | Base |
+| WebGPU integration | `webgpu.zig` | `-Dwebgpu=true -Dwebgpu-library=<provider>` |
 
 `basic.zig` is an additional compact introduction for this package.
 `vk_zig.zig` is an additional optional ownership-integration example enabled with

@@ -53,6 +53,18 @@ typedef unsigned long VisualID;
 #endif
 #endif
 
+#ifdef RGFW_WEBGPU
+/* RGFW's public WebGPU ABI needs only these two opaque handles. Keep the full
+ * generated WebGPU API in the consumer's chosen package, not rgfw.raw. */
+#define WEBGPU_H_
+typedef struct WGPUInstanceImpl* WGPUInstance;
+typedef struct WGPUSurfaceImpl* WGPUSurface;
+#endif
+
+#ifdef RGFW_ZIG_CUSTOM_BACKEND_HEADER
+#include RGFW_ZIG_CUSTOM_BACKEND_HEADER
+#else
 #include "RGFW.h"
+#endif
 
 #endif

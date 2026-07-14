@@ -8,9 +8,11 @@ pub fn main() !void {
         .flags = .{ .centered = true, .allow_drag_and_drop = true },
     });
     defer window.deinit();
+    context.setEventQueueEnabled(true);
+    try window.setEnabledEvents(rgfw.EventMask.all);
 
     while (window.isOpen()) {
-        context.waitForNextEvent();
+        context.waitForEvent(.forever);
         context.pollEvents();
         var events = window.events();
         while (events.next()) |event| {

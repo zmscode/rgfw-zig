@@ -9,15 +9,13 @@ pub fn main() !void {
     defer window.deinit();
 
     var pixels = iconPixels();
-    const handle = window.handle orelse return error.WindowClosed;
-    if (rgfw.raw.RGFW_window_setIconEx(
-        handle,
+    const image = try rgfw.Image.init(
         &pixels,
         @intCast(icon_size),
         @intCast(icon_size),
-        @intFromEnum(rgfw.ImageFormat.rgba8),
-        @intCast(rgfw.raw.RGFW_iconBoth),
-    ) == 0) return error.IconAssignmentFailed;
+        .rgba8,
+    );
+    try window.setIcon(image, .both);
 
     while (window.isOpen()) window.pumpEvents();
 }

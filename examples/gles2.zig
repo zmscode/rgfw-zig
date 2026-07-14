@@ -1,7 +1,24 @@
-const run = @import("support/run.zig");
+const rgfw = @import("rgfw");
 
 pub fn main() !void {
-    try run.egl("OpenGL ES 2 context", .{
+    var context = try rgfw.init("rgfw-zig-gles2", .{ .backend = .egl });
+    defer context.deinit();
+
+    var window = try context.createWindow("OpenGL ES 2 context", .{
         .flags = .{ .centered = true, .translucent = true },
-    }, null);
+    });
+    defer window.deinit();
+
+    const graphics_context = try rgfw.EGL.createContext(&window, .{
+        .hints = .{ .profile = .embedded, .major_version = 2, .minor_version = 0 },
+    });
+    rgfw.EGL.makeCurrent(&window);
+    if (rgfw.EGL.getContext(&window).?.rawHandle() != graphics_context.rawHandle()) {
+        return error.UnexpectedContext;
+    }
+    rgfw.EGL.swapInterval(&window, 1);
+    while (window.isOpen()) {
+        window.pumpEvents();
+        rgfw.EGL.swapBuffers(&window);
+    }
 }

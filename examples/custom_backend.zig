@@ -17,6 +17,7 @@ fn showNativeHandle(window: *rgfw.Window) void {
         .win32 => |handle| std.debug.print("HWND: {*}\n", .{handle.hwnd}),
         .x11 => |handle| std.debug.print("X11 window: {d}\n", .{handle}),
         .wayland => |handle| std.debug.print("wl_surface: {*}\n", .{handle}),
+        .custom => |handle| std.debug.print("custom backend source: {*}\n", .{handle}),
     }
     printed = true;
 }

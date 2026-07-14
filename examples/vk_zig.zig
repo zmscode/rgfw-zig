@@ -28,11 +28,7 @@ pub fn main() !void {
     });
     defer instance.deinit();
 
-    var surface = try rgfw.Vulkan.createOwnedSurfaceAs(
-        vk.raw.VkSurfaceKHR,
-        &window,
-        &instance,
-    );
+    var surface = try rgfw.Vulkan.createOwnedSurface(&window, &instance);
     defer surface.deinit();
 
     while (window.isOpen()) window.pumpEvents();

@@ -118,6 +118,16 @@ Non-positive dimensions return `error.InvalidSize`, while a closed window return
 `error.InactiveObject`. The platform applies the request asynchronously; consume
 `.window_resized` or install `rgfw.callback.window_resized` to observe the resulting size.
 
+Other runtime controls use the same checked value types:
+
+```zig
+try window.move(.{ .x = 40, .y = 40 });
+try window.setMinSize(.{ .width = 320, .height = 180 });
+try window.setAspectRatio(.{ .width = 16, .height = 9 });
+try window.setOpacity(220);
+try window.setEventEnabled(.mouse_raw_motion, true);
+```
+
 Captured first-person input is one state change rather than three independent calls:
 
 ```zig
@@ -209,6 +219,24 @@ runtime and shutdown diagnostics; use `initResult` for initialization failures.
 EGL is enabled independently with `.egl = true` or `-Degl=true`. Its official Khronos headers are
 downloaded lazily, just like the Vulkan headers.
 
+OpenGL and EGL context requirements can be stated explicitly instead of relying on driver
+defaults:
+
+```zig
+const gl_context = try rgfw.OpenGL.createContext(&window, .{ .hints = .{
+    .profile = .core,
+    .major_version = 3,
+    .minor_version = 3,
+    .debug = true,
+} });
+_ = gl_context; // Owned by window; Window.deinit releases it.
+rgfw.OpenGL.makeCurrent(&window);
+```
+
+`Graphics.GlobalHints` provides stable storage for RGFW's borrowed global-hints pointer. Explicit
+contexts returned by `OpenGL.createContext` and `EGL.createContext` are borrowed, window-owned
+handles and must not outlive or be deinitialized separately from their window.
+
 ### Window systems and native handles
 
 The build chooses `.cocoa` on macOS, `.win32` on Windows, and `.x11` on Unix by default. Linux can
@@ -227,10 +255,77 @@ require `wayland-scanner` plus the Wayland client, cursor, and xkbcommon develop
 protocol XML is fetched lazily from the RGFW revision vendored by this package, and generated C
 protocol code stays in Zig's cache.
 
+On Linux hosts using GCC 16, Zig 0.16's linker may reject `.sframe` relocations from the host CRT.
+This is a Zig/toolchain interaction rather than an RGFW source failure. Force Zig's explicit GNU
+target and system search prefix when it occurs:
+
+```sh
+zig build test -Dtarget=x86_64-linux-gnu --search-prefix /usr
+zig build examples -Dtarget=x86_64-linux-gnu --search-prefix /usr
+```
+
 Use `window.rawHandle()` for checked RGFW FFI access and `window.nativeHandle()` for a tagged
 `NativeWindowHandle`. Cocoa returns the window and view, Win32 returns HWND and HDC, X11 returns its
 window ID, and Wayland returns `wl_surface`. Closed windows and freed software surfaces report
 `error.InactiveObject` rather than requiring optional-field tricks.
+
+`Context.nativeDisplayHandle()` returns the matching display-level tagged union. Cocoa layer,
+X11 `Display`, Wayland `wl_display`, EGL context/display/surface, and Win32 window integrations are
+available without direct getter calls in `rgfw.raw`.
+
+### Ownership and borrowed data
+
+`Context`, `Window`, `Surface`, `CustomCursor`, and `EventSubscription` are single-owner values:
+do not copy a live value, and defer its idempotent `deinit`. Clipboard transfers returned by
+`Clipboard.read`, monitor names/handles, native handles, Vulkan extension names, and surface native
+images are borrowed. Their API documentation names the invalidating owner or operation.
+
+Use `Clipboard.readAlloc`, `Context.monitors`, `Monitor.supportedModes`, and
+`Monitor.gammaRamp` when data must outlive a borrowed view; free allocator-owned results with the
+same allocator. The ordinary software-surface path is `Surface.initForWindow`, which uses the
+window's visual and avoids X11 visual mismatches.
+
+### DirectX and WebGPU
+
+DirectX is Windows-only and opt-in with `.directx = true` or `-Ddirectx=true`.
+`rgfw.DirectX.createSwapChain` accepts a consumer's typed DXGI factory/device pointers and returns
+that package's requested swap-chain pointer type. Windows COM headers are intentionally not passed
+through translate-c, avoiding unusable SDK macro declarations.
+
+WebGPU is opt-in with `.webgpu = true`. The canonical `webgpu-headers` package is fetched lazily;
+the application must also link a compatible provider such as Dawn or wgpu-native. A system library
+can be named with `.@"webgpu-library" = "wgpu_native"` (or
+`-Dwebgpu-library=wgpu_native`). `WebGPU.createSurfaceAs` preserves ABI-compatible opaque handle
+types from the consumer's WebGPU package.
+
+### Custom allocation and backends
+
+Build with `.@"custom-allocator" = true`, keep an `AllocatorHooks` value alive for the complete
+RGFW lifetime, and install it before initialization:
+
+```zig
+var hooks = rgfw.AllocatorHooks.init(gpa);
+hooks.install();
+defer rgfw.AllocatorHooks.uninstall(); // after all RGFW resources are gone
+```
+
+The bridge stores allocation sizes so RGFW's pointer-only `RGFW_FREE` contract can safely call a
+Zig `std.mem.Allocator`. Installation is process-global and must not race RGFW allocation.
+
+A custom RGFW backend is selected with `.@"window-system" = .custom` and an absolute
+`.@"custom-backend-header"` path. The header follows RGFW's custom-backend contract: define
+`RGFW_CUSTOM_BACKEND`, define `RGFW_window_src`, include `RGFW.h`, and provide the required
+platform functions under `RGFW_IMPLEMENTATION`. The same header is used for translation and C
+compilation, preventing ABI drift. Adapter backends that select the target's normal platform can
+also set `.@"custom-backend-link-platform-libraries" = true`; true custom backends link their own
+dependencies from the application build.
+
+The repository validates this contract with a dependency-free headless backend:
+
+```sh
+zig build test -Dwindow-system=custom \
+  -Dcustom-backend-header="$PWD/tests/minimal_custom_backend.h"
+```
 
 ### Vulkan
 
@@ -272,16 +367,9 @@ package uses the standard `VK_EXT_metal_surface` path and creates the surface fr
 `CAMetalLayer`.
 
 When another Zig package owns independently translated Vulkan handle types, use the checked
-interop boundary instead of scattering `@ptrCast` calls through application code. For example,
-with `vk-zig`'s explicit raw-handle accessor:
-
-```zig
-const surface: vk.raw.VkSurfaceKHR = try rgfw.Vulkan.createSurfaceAs(
-    vk.raw.VkSurfaceKHR,
-    &window,
-    instance.rawHandle(),
-);
-```
+interop boundary instead of scattering `@ptrCast` calls through application code. The advanced
+non-owning form is `createSurfaceAs`; it verifies handle representation and leaves destruction to
+the caller.
 
 `createSurfaceAs` accepts only opaque pointer handles (or the target platform's unsigned integer
 Vulkan handle representation) with the same size and representation as RGFW's handle. The ABI
@@ -301,11 +389,7 @@ var extensions: vk.ExtensionSet(4) = .{};
 try rgfw.Vulkan.appendRequiredInstanceExtensions(&extensions);
 try extensions.appendAll(vk.Portability.instanceExtensions());
 
-var surface = try rgfw.Vulkan.createOwnedSurfaceAs(
-    vk.raw.VkSurfaceKHR,
-    &window,
-    &instance,
-);
+var surface = try rgfw.Vulkan.createOwnedSurface(&window, &instance);
 defer surface.deinit();
 ```
 
@@ -321,7 +405,7 @@ also available through `rgfw.raw` when the option is enabled.
 The package includes an idiomatic Zig counterpart for every upstream RGFW example directory at
 the vendored revision. They cover callbacks, clipboard access, event queues, window flags,
 multiple windows, monitor state, software surfaces, cursors/icons, OpenGL, EGL, Metal handles,
-DirectX handles, and Vulkan instance/surface creation. See
+DirectX/WebGPU interop, and Vulkan instance/surface creation. See
 [`examples/README.md`](examples/README.md) for the full feature-gated index.
 
 ### Translation errors
@@ -338,8 +422,8 @@ This leaves the raw module free of `@compileError` placeholders. Useful RGFW con
 values remain available; `RGFW_TRUE` and `RGFW_FALSE` are restored explicitly.
 
 The test step also compiles intentional failures for wrong callback payloads, mismatched native
-handles, disabled Vulkan use, and ABI-incompatible foreign Vulkan handles. This keeps the wrapper's
-own `@compileError` messages actionable as Zig evolves.
+handles, disabled Vulkan/DirectX/WebGPU use, and ABI-incompatible foreign Vulkan handles. This
+keeps the wrapper's own `@compileError` messages actionable as Zig evolves.
 
 The package configures RGFW for Cocoa, Win32, X11, or Wayland explicitly. Linux and BSD X11 users
 need the X11 and XRandR development packages installed. Linux Wayland users need the tools and

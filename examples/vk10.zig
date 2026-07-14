@@ -1,4 +1,5 @@
 const builtin = @import("builtin");
+const std = @import("std");
 const rgfw = @import("rgfw");
 
 pub fn main() !void {
@@ -74,8 +75,5 @@ fn load(
     instance: rgfw.raw.VkInstance,
     name: [*:0]const u8,
 ) Function {
-    const procedure = rgfw.raw.RGFW_getInstanceProcAddress_Vulkan(instance, name) orelse {
-        return null;
-    };
-    return @ptrCast(procedure);
+    return rgfw.Vulkan.load(Function, instance, std.mem.span(name));
 }
