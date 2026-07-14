@@ -352,6 +352,7 @@ pub const Window = struct {
     pub const Error = error{
         InvalidSize,
         CreationFailed,
+        InactiveObject,
     };
 
     pub const Options = struct {
@@ -471,6 +472,15 @@ pub const Window = struct {
             return .{ .width = 0, .height = 0 };
         }
         return .{ .width = width, .height = height };
+    }
+
+    /// Requests a client-area resize. RGFW reports the resulting size through
+    /// its queued event and callback paths after the platform applies it.
+    pub fn resize(window: *Window, width: i32, height: i32) Error!void {
+        if (width <= 0) return error.InvalidSize;
+        if (height <= 0) return error.InvalidSize;
+        const handle = window.handle orelse return error.InactiveObject;
+        raw.RGFW_window_resize(handle, width, height);
     }
 
     pub fn position(window: *const Window) Point {

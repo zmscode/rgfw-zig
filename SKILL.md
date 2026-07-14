@@ -77,6 +77,10 @@ fn onResize(size: rgfw.Size) void {
 Use `onWithContext` for application state. Do not write `callconv(.c)` adapters for wrapped event
 kinds. Deinitialize subscriptions in reverse installation order before the RGFW context.
 
+Use `try window.resize(width, height)` for programmatic resizing. It validates positive dimensions
+and active lifetime before calling RGFW. Treat the request as asynchronous and consume the typed
+`.window_resized` event or callback for the applied size.
+
 For compact, non-exhaustive handlers, use the nullable `Event` accessors: `keyEvent()`,
 `mouseButton()`, `scrollDelta()`, `rawMouseDelta()`, `mousePosition()`, `mouseInWindow()`,
 `focusState()`, `windowPosition()`, `windowSize()`, and `refreshRect()`. Each returns `null` for an

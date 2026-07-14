@@ -24,6 +24,9 @@ pub fn main() !void {
     var closed = try context.on(rgfw.callback.window_close, windowClosed);
     defer closed.deinit();
 
+    // The platform applies this request asynchronously and emits the typed callback above.
+    try window.resize(960, 540);
+
     while (window.isOpen()) window.pumpEvents();
 }
 

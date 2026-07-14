@@ -37,6 +37,15 @@ test "checked handles report inactive wrapper objects" {
     try std.testing.expect(@hasDecl(rgfw.Window, "nativeHandleAs"));
 }
 
+test "window resize validates dimensions and lifetime before calling RGFW" {
+    var window: rgfw.Window = .{ .handle = null };
+    try std.testing.expectError(error.InvalidSize, window.resize(0, 480));
+    try std.testing.expectError(error.InvalidSize, window.resize(640, 0));
+    try std.testing.expectError(error.InvalidSize, window.resize(-1, 480));
+    try std.testing.expectError(error.InvalidSize, window.resize(640, -1));
+    try std.testing.expectError(error.InactiveObject, window.resize(640, 480));
+}
+
 fn ignoreWindowClose() void {}
 
 test "typed callback installation checks context lifetime" {

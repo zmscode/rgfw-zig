@@ -108,6 +108,16 @@ Use `onWithContext` when a handler needs application state. The descriptor fixes
 so a mismatched handler is rejected at compile time. Subscriptions restore the previous RGFW
 callback when deinitialized and should be released in reverse installation order.
 
+Programmatic resizing is checked and uses the same typed event path:
+
+```zig
+try window.resize(1280, 720);
+```
+
+Non-positive dimensions return `error.InvalidSize`, while a closed window returns
+`error.InactiveObject`. The platform applies the request asynchronously; consume
+`.window_resized` or install `rgfw.callback.window_resized` to observe the resulting size.
+
 Captured first-person input is one state change rather than three independent calls:
 
 ```zig
