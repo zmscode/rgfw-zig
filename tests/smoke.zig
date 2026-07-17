@@ -59,9 +59,9 @@ test "owning wrappers are safe to deinitialize repeatedly" {
 }
 
 test "event masks and waits round trip without magic integers" {
-    inline for (@typeInfo(rgfw.EventMask).@"struct".fields) |field| {
+    inline for (@typeInfo(rgfw.EventMask).@"struct".field_names) |field_name| {
         var mask: rgfw.EventMask = .{};
-        @field(mask, field.name) = true;
+        @field(mask, field_name) = true;
         try std.testing.expectEqual(mask.toRaw(), rgfw.EventMask.fromRaw(mask.toRaw()).toRaw());
     }
     try std.testing.expectEqual(
@@ -450,6 +450,7 @@ test "Vulkan declarations and helpers follow the feature option" {
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "createSurfaceAs"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "appendRequiredInstanceExtensions"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "createOwnedSurfaceAs"));
+    try std.testing.expect(@hasDecl(rgfw.Vulkan, "surfaceAdapter"));
     try std.testing.expect(@hasDecl(rgfw.Vulkan, "presentationSupported"));
 
     var extensions = rgfw.Vulkan.requiredInstanceExtensions();

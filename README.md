@@ -1,6 +1,6 @@
 # rgfw-zig
 
-Zig 0.16 bindings for [RGFW](https://github.com/ColleagueRiley/RGFW). The package:
+Zig 0.17 development bindings for [RGFW](https://github.com/ColleagueRiley/RGFW). The package:
 
 - translates and cleans the vendored `RGFW.h` for the selected Zig target;
 - provides an idiomatic, resource-safe Zig API and the complete raw C ABI;
@@ -15,10 +15,11 @@ version-specific integration and validation guidance.
 
 ## Use as a dependency
 
-Add the package to your application's `build.zig.zon` with Zig 0.16:
+This branch is tested with Zig `0.17.0-dev.1415+64dfaa568`. Add it to your application's
+`build.zig.zon` with:
 
 ```sh
-zig fetch --save=rgfw git+https://github.com/zmscode/rgfw-zig.git
+zig fetch --save=rgfw git+https://github.com/zmscode/rgfw-zig.git#codex/zig-0.17-dev
 ```
 
 The command records a content hash and resolved Git revision in `build.zig.zon`. For local
@@ -257,7 +258,7 @@ require `wayland-scanner` plus the Wayland client, cursor, and xkbcommon develop
 protocol XML is fetched lazily from the RGFW revision vendored by this package, and generated C
 protocol code stays in Zig's cache.
 
-On Linux hosts using GCC 16, Zig 0.16's linker may reject `.sframe` relocations from the host CRT.
+On Linux hosts using GCC 16, Zig's linker may reject `.sframe` relocations from the host CRT.
 This is a Zig/toolchain interaction rather than an RGFW source failure. Force Zig's explicit GNU
 target and system search prefix when it occurs:
 
@@ -391,19 +392,22 @@ reinterpretation does not transfer ownership: the application must destroy the r
 through the Vulkan instance that created it. `rgfw-zig` does not import `vk-zig`, so neither package
 introduces a dependency cycle.
 
-With [vk-zig](https://github.com/zmscode/vk-zig), its fixed-capacity extension set accepts RGFW's
-borrowed C names directly and RGFW can transfer the new surface into vk-zig ownership in one call:
+With [vk-zig](https://github.com/zmscode/vk-zig), use its generated platform extension descriptors
+and RGFW's checked surface adapter. The packages remain independent; the adapter is structurally
+typed and does not make `rgfw-zig` import `vk-zig`:
 
 ```sh
-zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git
+zig fetch --save=vulkan git+https://github.com/zmscode/vk-zig.git#codex/zig-0.17-dev
 ```
 
 ```zig
-var extensions: vk.ExtensionSet(4) = .{};
-try rgfw.Vulkan.appendRequiredInstanceExtensions(&extensions);
+var extensions: vk.InstanceExtensionSet(4) = .{};
+try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
 try extensions.appendAll(vk.Portability.instanceExtensions());
 
-var surface = try rgfw.Vulkan.createOwnedSurface(&window, &instance);
+var surface = try instance.createSurfaceWithAdapter(
+    rgfw.Vulkan.surfaceAdapter(vk, &window),
+);
 defer surface.deinit();
 ```
 

@@ -1381,9 +1381,9 @@ pub const EventMask = struct {
     pub fn toRaw(mask: EventMask) raw.RGFW_eventFlag {
         @setEvalBranchQuota(10_000);
         var result: raw.RGFW_eventFlag = 0;
-        inline for (@typeInfo(EventMask).@"struct".fields) |field| {
-            if (@field(mask, field.name)) {
-                const kind: EventKind = @field(EventKind, field.name);
+        inline for (@typeInfo(EventMask).@"struct".field_names) |field_name| {
+            if (@field(mask, field_name)) {
+                const kind: EventKind = @field(EventKind, field_name);
                 result |= @as(raw.RGFW_eventFlag, 1) << @intCast(@intFromEnum(kind));
             }
         }
@@ -1393,10 +1393,10 @@ pub const EventMask = struct {
     pub fn fromRaw(value: raw.RGFW_eventFlag) EventMask {
         @setEvalBranchQuota(10_000);
         var result: EventMask = .{};
-        inline for (@typeInfo(EventMask).@"struct".fields) |field| {
-            const kind: EventKind = @field(EventKind, field.name);
+        inline for (@typeInfo(EventMask).@"struct".field_names) |field_name| {
+            const kind: EventKind = @field(EventKind, field_name);
             const flag = @as(raw.RGFW_eventFlag, 1) << @intCast(@intFromEnum(kind));
-            @field(result, field.name) = value & flag != 0;
+            @field(result, field_name) = value & flag != 0;
         }
         return result;
     }
@@ -3065,7 +3065,7 @@ fn requireContextPointer(comptime ContextPointer: type, comptime role: []const u
         .pointer => |pointer| pointer,
         else => @compileError(role ++ " must be a non-optional single-item pointer"),
     };
-    if (pointer.size != .one or pointer.is_allowzero) {
+    if (pointer.size != .one or pointer.attrs.@"allowzero") {
         @compileError(role ++ " must be a non-optional single-item pointer");
     }
 }
@@ -3176,7 +3176,7 @@ pub const Vulkan = if (features.vulkan) struct {
         return sentinel_ptrs[0..count];
     }
 
-    /// Appends RGFW's borrowed names to an extension set such as vk-zig's ExtensionSet.
+    /// Appends RGFW's borrowed names to a compatible raw extension-name set.
     pub fn appendRequiredInstanceExtensions(extension_set: anytype) @TypeOf(
         extension_set.appendPointerNames(requiredInstanceExtensionPointers()),
     ) {
@@ -3246,6 +3246,42 @@ pub const Vulkan = if (features.vulkan) struct {
             window,
             foreign_instance_owner,
         );
+    }
+
+    /// Adapts RGFW surface creation to vk-zig without importing vk-zig here.
+    /// The window must remain alive until the adapter is consumed.
+    pub fn surfaceAdapter(comptime Vk: type, window: *const Window) Vk.SurfaceAdapter {
+        comptime {
+            if (!@hasDecl(Vk, "SurfaceAdapter") or
+                !@hasDecl(Vk, "Instance") or
+                !@hasDecl(Vk, "Surface") or
+                !@hasDecl(Vk, "Error"))
+            {
+                @compileError("Vulkan package must expose SurfaceAdapter, Instance, Surface, and Error");
+            }
+        }
+
+        const Adapter = struct {
+            fn create(
+                erased_window: ?*anyopaque,
+                instance: *const Vk.Instance,
+            ) Vk.Error!Vk.Surface {
+                const typed_window: *const Window = @ptrCast(@alignCast(
+                    erased_window orelse return error.InvalidHandle,
+                ));
+                return createOwnedSurface(typed_window, instance) catch |err| return switch (err) {
+                    error.InvalidInstance => error.InvalidHandle,
+                    error.SurfaceCreationFailed => error.InitializationFailed,
+                    error.SurfaceOwnershipUnavailable => error.MissingCommand,
+                    else => @errorCast(err),
+                };
+            }
+        };
+
+        return .{
+            .context = @ptrCast(@constCast(window)),
+            .create = Adapter.create,
+        };
     }
 
     pub fn presentationSupported(
@@ -3401,10 +3437,10 @@ pub const Vulkan = if (features.vulkan) struct {
             @compileError("foreign Vulkan instance owner must provide an adoptSurface method");
         }
         const function = @typeInfo(@TypeOf(Owner.adoptSurface)).@"fn";
-        if (function.params.len < 2) {
+        if (function.param_types.len < 2) {
             @compileError("foreign Vulkan adoptSurface method must accept a surface handle");
         }
-        return function.params[1].type orelse {
+        return function.param_types[1] orelse {
             @compileError("foreign Vulkan adoptSurface surface parameter must have a concrete type");
         };
     }

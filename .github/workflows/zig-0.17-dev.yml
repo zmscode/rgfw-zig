@@ -1,0 +1,67 @@
+name: Zig 0.17 dev
+
+on:
+  push:
+    branches: [codex/zig-0.17-dev]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ZIG_VERSION: 0.17.0-dev.1415+64dfaa568
+  ZIG_SHA256: db27c15cbb979760a5e31cc10c451f27b2c79c02560776ae3f831161584b099d
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install native backend dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libegl1-mesa-dev \
+            libgl1-mesa-dev \
+            libwayland-bin \
+            libwayland-dev \
+            libx11-dev \
+            libxkbcommon-dev \
+            libxrandr-dev
+
+      - name: Install pinned Zig development compiler
+        shell: bash
+        run: |
+          archive="zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          curl --fail --location --retry 3 \
+            --output "${RUNNER_TEMP}/${archive}" \
+            "https://ziglang.org/builds/${archive}"
+          echo "${ZIG_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum --check
+          tar --directory "${RUNNER_TEMP}" --extract --file "${RUNNER_TEMP}/${archive}"
+          echo "${RUNNER_TEMP}/zig-x86_64-linux-${ZIG_VERSION}" >> "${GITHUB_PATH}"
+
+      - name: Verify compiler and formatting
+        run: |
+          test "$(zig version)" = "${ZIG_VERSION}"
+          zig fmt --check build.zig src tests tools examples
+
+      - name: Test wrappers and generator
+        run: |
+          zig build test
+          zig build test -Doptimize=ReleaseFast
+          zig build test -Dvulkan=true
+          zig build test -Dcustom-allocator=true
+
+      - name: Build graphics examples
+        run: |
+          zig build examples -Dopengl=true -Degl=true -Dvulkan=true
+          zig build examples -Dvulkan=true -Dvk-zig-example=true
+          zig build examples -Dwebgpu=true
+
+      - name: Generate cross-target bindings
+        run: |
+          zig build bindings -Dtarget=x86_64-windows-gnu -Ddirectx=true -p zig-out/windows
+          zig build bindings -Dtarget=x86_64-linux-gnu -p zig-out/x11
+          zig build bindings -Dtarget=x86_64-linux-gnu -Dwindow-system=wayland -p zig-out/wayland

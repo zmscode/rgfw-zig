@@ -50,6 +50,8 @@ typedef struct VkWin32SurfaceCreateInfoKHR VkWin32SurfaceCreateInfoKHR;
 typedef struct VkXlibSurfaceCreateInfoKHR VkXlibSurfaceCreateInfoKHR;
 typedef struct _XDisplay Display;
 typedef unsigned long VisualID;
+#elif defined(RGFW_WAYLAND)
+typedef struct VkWaylandSurfaceCreateInfoKHR VkWaylandSurfaceCreateInfoKHR;
 #endif
 #endif
 

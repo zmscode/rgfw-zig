@@ -16,8 +16,8 @@ pub fn main() !void {
     defer loader.deinit();
     const entry = try loader.entry();
 
-    var extensions: vk.ExtensionSet(4) = .{};
-    try rgfw.Vulkan.appendRequiredInstanceExtensions(&extensions);
+    var extensions: vk.InstanceExtensionSet(4) = .{};
+    try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
     try extensions.appendAll(vk.Portability.instanceExtensions());
 
     var instance = try entry.createInstance(.{
@@ -28,7 +28,9 @@ pub fn main() !void {
     });
     defer instance.deinit();
 
-    var surface = try rgfw.Vulkan.createOwnedSurface(&window, &instance);
+    var surface = try instance.createSurfaceWithAdapter(
+        rgfw.Vulkan.surfaceAdapter(vk, &window),
+    );
     defer surface.deinit();
 
     while (window.isOpen()) window.pumpEvents();

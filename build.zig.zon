@@ -2,7 +2,7 @@
     .name = .rgfw,
     .fingerprint = 0x502c4210e5f63eac,
     .version = "0.1.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0-dev.1415+64dfaa568",
     .dependencies = .{
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.4.352.tar.gz",
@@ -25,8 +25,8 @@
             .lazy = true,
         },
         .vulkan = .{
-            .url = "git+https://github.com/zmscode/vk-zig.git#451064cb6e29b762d2d39d277bf02be82afca97f",
-            .hash = "vulkan-0.1.0-wSyCJW3qTwDYHHFJxxjDvntQFnwhMsPd9RcWucue2vBQ",
+            .url = "git+https://github.com/zmscode/vk-zig.git#8a0a30eda8ba2571a393494547941b09fbde33e4",
+            .hash = "vulkan-0.1.0-wSyCJcalaAAmO1rzDGOQgtApfz0Tjl0Gw77bU9lIRWE9",
             .lazy = true,
         },
     },
@@ -34,6 +34,7 @@
         "build.zig",
         "build.zig.zon",
         "examples",
+        "patches",
         "src",
         "tests",
         "tools",

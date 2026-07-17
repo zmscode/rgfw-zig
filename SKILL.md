@@ -1,6 +1,6 @@
 ---
 name: rgfw-zig
-description: Integrate, configure, regenerate, test, and debug the rgfw-zig Zig 0.16 bindings for RGFW. Use when an agent needs RGFW windows, input, monitors, software surfaces, OpenGL, EGL, Vulkan, DirectX, or WebGPU; needs advanced allocator/backend configuration; or must regenerate bindings from upstream.
+description: Integrate, configure, regenerate, test, and debug the rgfw-zig Zig 0.17 development bindings for RGFW. Use when an agent needs RGFW windows, input, monitors, software surfaces, OpenGL, EGL, Vulkan, DirectX, or WebGPU; needs advanced allocator/backend configuration; or must regenerate bindings from upstream.
 ---
 
 # RGFW Zig
@@ -13,7 +13,7 @@ cover an RGFW operation.
 Run:
 
 ```sh
-zig fetch --save=rgfw git+https://github.com/zmscode/rgfw-zig.git
+zig fetch --save=rgfw git+https://github.com/zmscode/rgfw-zig.git#codex/zig-0.17-dev
 ```
 
 In `build.zig`, pass the executable's target and optimization mode to the dependency, then import
@@ -133,17 +133,23 @@ typed handler to receive an initialization failure.
   pointers directly with `appendRequiredInstanceExtensions`. Enable each before creating the
   instance. macOS uses `VK_EXT_metal_surface` rather than the deprecated MVK surface extension.
 
-For independently translated Vulkan handles such as `vk-zig`, centralize ABI reinterpretation:
+For vk-zig, use its typed platform extensions and RGFW's structural surface adapter:
 
 ```zig
-var surface = try rgfw.Vulkan.createOwnedSurface(&window, &instance);
+var extensions: vk.InstanceExtensionSet(4) = .{};
+try extensions.appendAll(vk.SurfaceConfiguration.instanceExtensions());
+try extensions.appendAll(vk.Portability.instanceExtensions());
+
+var surface = try instance.createSurfaceWithAdapter(
+    rgfw.Vulkan.surfaceAdapter(vk, &window),
+);
 defer surface.deinit();
 ```
 
 Do not add local Vulkan `@ptrCast` bridges. `createSurfaceAs` validates handle representation and
-size when raw ownership stays with the caller. Prefer `createOwnedSurface` with vk-zig so its
-`Instance.adoptSurface` owns and destroys the surface. Populate `vk.ExtensionSet` with
-`appendRequiredInstanceExtensions`; do not hand-copy the pointer array.
+size when raw ownership stays with the caller. `createOwnedSurface` remains available for packages
+that expose `rawHandle` and `adoptSurface`; current vk-zig integrations should prefer
+`Instance.createSurfaceWithAdapter`.
 
 For DirectX and WebGPU packages with independently declared handles, use
 `DirectX.createSwapChain` and `WebGPU.createSurfaceAs`; do not add application-level casts.

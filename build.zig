@@ -46,11 +46,11 @@ pub fn build(b: *std.Build) void {
         "vk-zig-example",
         "Build the optional vk-zig ownership integration example",
     ) orelse false;
-    const vulkan_headers = if (vulkan) b.lazyDependency("vulkan_headers", .{}) else null;
+    const vulkan_headers = if (vulkan) b.dependency("vulkan_headers", .{}) else null;
     const vulkan_include = if (vulkan_headers) |dependency| dependency.path("include") else null;
-    const egl_headers = if (egl_enabled) b.lazyDependency("egl_headers", .{}) else null;
+    const egl_headers = if (egl_enabled) b.dependency("egl_headers", .{}) else null;
     const egl_include = if (egl_headers) |dependency| dependency.path("api") else null;
-    const webgpu_headers = if (webgpu) b.lazyDependency("webgpu_headers", .{}) else null;
+    const webgpu_headers = if (webgpu) b.dependency("webgpu_headers", .{}) else null;
     const webgpu_include = if (webgpu_headers) |dependency| dependency.path("") else null;
 
     const features: Features = .{
@@ -408,9 +408,7 @@ fn linkPlatformLibraries(
 }
 
 fn generateWaylandProtocols(b: *std.Build) WaylandProtocols {
-    const upstream = b.lazyDependency("rgfw_upstream", .{}) orelse {
-        @panic("the wayland window system requires the lazy rgfw_upstream dependency");
-    };
+    const upstream = b.dependency("rgfw_upstream", .{});
     const protocols = [_][]const u8{
         "xdg-shell",
         "xdg-toplevel-icon-v1",
@@ -484,6 +482,16 @@ fn addTestStep(
 
     const test_step = b.step("test", "Build and run the binding tests");
     test_step.dependOn(&run_tests.step);
+
+    const cleaner_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("tools/clean_bindings.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+        }),
+    });
+    const run_cleaner_tests = b.addRunArtifact(cleaner_tests);
+    test_step.dependOn(&run_cleaner_tests.step);
 
     addCompileFailureTest(
         b,
@@ -605,7 +613,7 @@ fn addExampleSteps(
         if (example.requirement == .vk_zig and !vk_zig_example) continue;
 
         const vk_zig = if (example.requirement == .vk_zig)
-            b.lazyDependency("vulkan", .{
+            b.dependency("vulkan", .{
                 .target = target,
                 .optimize = optimize,
                 .platform = switch (features.window_system) {
@@ -615,7 +623,7 @@ fn addExampleSteps(
                     .wayland => "wayland",
                     .custom => @panic("the vk-zig example does not define a custom platform"),
                 },
-            }) orelse @panic("the vk-zig example requires the lazy vulkan dependency")
+            })
         else
             null;
 
@@ -879,8 +887,10 @@ fn addUpdateStep(
 
     const apply_local_patches = b.addSystemCommand(&.{ "git", "-C" });
     apply_local_patches.addDirectoryArg(checkout);
-    apply_local_patches.addArg("apply");
-    apply_local_patches.addFileArg(b.path("patches/rgfw-monitor-fixes.patch"));
+    apply_local_patches.addArgs(&.{ "apply", "-" });
+    apply_local_patches.setStdIn(.{
+        .lazy_path = b.path("patches/rgfw-monitor-fixes.patch"),
+    });
 
     const revision = b.addSystemCommand(&.{ "git", "-C" });
     revision.addDirectoryArg(checkout);
